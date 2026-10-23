@@ -48,23 +48,6 @@ const initialInventory = [
   { id: 7, name: 'حقن بلاستيكية 5مل (Syringe 5ml)', barcode: '62810006666', batchNo: 'BAT-2026-G', quantity: 45, price: 2.50, expiryDate: '2028-03-01', category: 'مستلزمات', status: 'active' },
 ];
 
-const ACCOUNTS = {
-  nurse: {
-    role: 'nurse',
-    passwordHash: '378cd0d51fb73722d4d8d0821159507c2d40cd7525a4588f38529d1255c4082c',
-  },
-  supervisor: {
-    role: 'supervisor',
-    passwordHash: 'f5927ab1e8bfee00cad47dc6f939bd3749c0c746ccff8927ae1b4b84b03225e7',
-  },
-};
-
-const sha256 = async (value) => {
-  const encoded = new TextEncoder().encode(value);
-  const digest = await crypto.subtle.digest('SHA-256', encoded);
-  return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, '0')).join('');
-};
-
 const actorLabel = (user) => {
   if (!user) return '';
   return user.role === 'nurse' ? 'الممرضة' : 'المشرف';
@@ -128,11 +111,7 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState(() => {
     const savedUser = localStorage.getItem('emergency_inventory_user');
     if (savedUser) {
-      try {
-        const parsed = JSON.parse(savedUser);
-        if (!parsed?.role || !ACCOUNTS[parsed.role]) return null;
-        return { role: parsed.role, name: actorLabel(parsed), id: parsed.role };
-      } catch (e) { console.error(e); }
+      try { return JSON.parse(savedUser); } catch (e) { console.error(e); }
     }
     return null;
   });
@@ -324,25 +303,27 @@ export default function App() {
     }
   }, [items, message, activeTab, showAddForm, currentUser]);
 
-  const handleLoginSubmit = async (e) => {
+  const handleLoginSubmit = (e) => {
     e.preventDefault();
     setLoginError('');
 
     const username = loginForm.username.trim().toLowerCase();
     const password = loginForm.password.trim();
-    const account = ACCOUNTS[username];
-    const passwordHash = await sha256(password);
 
-    if (!account || passwordHash !== account.passwordHash) {
+    if (username === 'supervisor' && password === 'Ss@102938') {
+      const user = { name: 'د. علي الشمري (مشرف)', role: 'supervisor', id: 'ADM-101' };
+      setCurrentUser(user);
+      addLog('تسجيل دخول', 'تسجيل دخول', 'system', user);
+      playSound('success');
+    } else if (username === 'nurse' && password === 'Nn@1234') {
+      const user = { name: 'الممرضة نورة العتيبي', role: 'nurse', id: 'NRS-408' };
+      setCurrentUser(user);
+      addLog('تسجيل دخول', 'تسجيل دخول', 'system', user);
+      playSound('success');
+    } else {
       setLoginError('اسم المستخدم أو كلمة المرور غير صحيحة!');
       playSound('error');
-      return;
     }
-
-    const user = { name: actorLabel(account), role: account.role, id: account.role };
-    setCurrentUser(user);
-    addLog('تسجيل دخول', 'تسجيل دخول', 'system', user);
-    playSound('success');
   };
 
   const handleLogout = () => {
@@ -620,7 +601,7 @@ export default function App() {
             <div>
               <h1 className="text-2xl font-black text-slate-900 tracking-tight">نظام متابعة أدوية الطوارئ الذكي</h1>
               <p className="text-xs text-emerald-600 font-semibold mt-0.5">
-                المستخدم الحالي: <span className="font-bold text-slate-800">{actorLabel(currentUser)}</span> ({currentUser.role === 'nurse' ? 'كادر تمريض (واجهة صرف فقط)' : 'مشرف / صيدلي'})
+                المستخدم الحالي: <span className="font-bold text-slate-800">{currentUser.name}</span> ({currentUser.role === 'nurse' ? 'كادر تمريض (واجهة صرف فقط)' : 'مشرف / صيدلي'})
               </p>
             </div>
           </div>
