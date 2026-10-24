@@ -142,6 +142,27 @@ const formatStock = (item) => {
   return `${boxes} علبة + ${loose} حبة (${total} حبة)`;
 };
 
+const isoDate = (value) => {
+  const match = String(value || '').match(/^(\d{4}-\d{2}-\d{2})/);
+  return match ? match[1] : String(value || '');
+};
+
+const olderAvailableBatch = (stock, candidate) => {
+  if (!candidate) return null;
+  const candidateDays = calculateExpiryDays(candidate.expiryDate);
+  const name = String(candidate.name || '').trim();
+  return (stock || [])
+    .filter((item) => (
+      item.id !== candidate.id
+      && String(item.name || '').trim() === name
+      && item.status !== 'disposed'
+      && totalUnitsOf(item) > 0
+      && calculateExpiryDays(item.expiryDate) > 0
+      && calculateExpiryDays(item.expiryDate) < candidateDays
+    ))
+    .sort((a, b) => calculateExpiryDays(a.expiryDate) - calculateExpiryDays(b.expiryDate))[0] || null;
+};
+
 const inventorySelect = () => {
   let columns = INVENTORY_COLUMNS;
   if (inventorySupportsStorage) columns += ',storage_quality';
@@ -365,6 +386,7 @@ export default function App() {
   const [profileDrafts, setProfileDrafts] = useState({});
 
   const barcodeRef = useRef(null);
+  const messageTimer = useRef(null);
   const itemsRef = useRef(items);
   const logsRef = useRef(logs);
   const remoteReady = useRef(false);
@@ -694,6 +716,12 @@ export default function App() {
       }
 
       const targetBatch = availableBatches[0];
+      const olderBatch = olderAvailableBatch(activeItems, targetBatch);
+      if (olderBatch) {
+        playSound('error');
+        showMessage(`تنبيه: توجد علبة أقدم متوفرة بهذا الدواء (تاريخ الانتهاء: ${isoDate(olderBatch.expiryDate)}). يرجى صرف العلبة الأقدم أولاً لضمان سلامة المخزون.`, 'fefo');
+        return;
+      }
       const perBox = unitsPerBoxOf(targetBatch);
       const pills = dispenseUnit === 'box' ? count * perBox : count;
       const available = totalUnitsOf(targetBatch);
@@ -875,7 +903,8 @@ export default function App() {
 
   const showMessage = (text, type) => {
     setMessage({ text, type });
-    setTimeout(() => setMessage(null), 5000);
+    if (messageTimer.current) clearTimeout(messageTimer.current);
+    messageTimer.current = setTimeout(() => setMessage(null), type === 'fefo' ? 12000 : 5000);
   };
 
   const filteredItems = items.filter(item => {
@@ -1304,8 +1333,12 @@ export default function App() {
         {/* الكارت الرئيسي */}
         <div className="bg-white/90 backdrop-blur-xl rounded-3xl shadow-2xl shadow-slate-200/60 border border-white/80 overflow-hidden">
           {message && (
-            <div className={`m-4 p-3.5 rounded-2xl text-xs font-bold no-print ${
-              message.type === 'success' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-red-50 text-red-700 border border-red-200'
+            <div className={`m-4 p-4 rounded-2xl font-bold no-print ${
+              message.type === 'fefo'
+                ? 'bg-red-600 text-white border border-red-700 text-sm leading-7'
+                : message.type === 'success'
+                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs'
+                  : 'bg-red-50 text-red-700 border border-red-200 text-xs'
             }`}>
               {message.text}
             </div>
