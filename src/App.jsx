@@ -50,34 +50,135 @@ const initialInventory = [
 
 const actorLabel = (user) => {
   if (!user) return '';
-  return user.role === 'nurse' ? 'ممرضة' : 'مشرف';
+  if (user.role === 'nurse') return 'ممرضة';
+  if (user.role === 'data_entry') return 'مدخل البيانات';
+  return 'مشرف';
+};
+
+const dispenserLabel = (user) => {
+  if (!user) return '—';
+  if (user.role === 'nurse' && user.name && user.name !== 'ممرضة') return `${user.name} — ممرضة`;
+  return actorLabel(user) || '—';
+};
+
+const canManageItems = (user) => user?.role === 'supervisor' || user?.role === 'data_entry';
+
+const NURSE_USERNAMES = ['nurse_1', 'nurse_2', 'nurse_3', 'nurse_4'];
+const KNOWN_NURSE_IDS = {
+  'ae5fe82f-0b40-4292-923c-4154f12a4ac0': 'nurse_1',
+  'd6279f65-94ac-4d4b-a56b-8374a0ebe504': 'nurse_2',
+  'ac717d1f-c264-4199-a162-f30c5ab342b6': 'nurse_3',
+  'c38d4773-183c-4192-af72-9f5cc8df23d6': 'nurse_4',
+};
+const mapNurseProfiles = (rows) => {
+  const used = new Set();
+  const mapped = (rows || []).slice(0, 4).map((row) => {
+    const username = KNOWN_NURSE_IDS[row.id] || '';
+    if (username) used.add(username);
+    return { ...row, username };
+  });
+  let next = 1;
+  return mapped
+    .map((row) => {
+      if (row.username) return row;
+      while (used.has(`nurse_${next}`)) next += 1;
+      const username = `nurse_${next}`;
+      used.add(username);
+      next += 1;
+      return { ...row, username };
+    })
+    .sort((a, b) => a.username.localeCompare(b.username));
+};
+const STORAGE_OPTIONS = ['حرارة الغرفة', 'يحفظ في الثلاجة'];
+
+let inventorySupportsStorage = false;
+let inventorySupportsUnits = false;
+
+const unitsPerBoxOf = (item) => {
+  const count = Math.floor(Number(item?.unitsPerBox));
+  return count > 0 ? count : 1;
+};
+
+const totalUnitsOf = (item) => {
+  if (item?.totalUnits !== undefined && item?.totalUnits !== null && item.totalUnits !== '') {
+    return Math.max(0, Math.floor(Number(item.totalUnits) || 0));
+  }
+  return Math.max(0, Math.floor(Number(item?.quantity) || 0) * unitsPerBoxOf(item));
+};
+
+const withStock = (item, totalUnits, unitsPerBox = unitsPerBoxOf(item)) => {
+  const perBox = Math.max(1, Math.floor(Number(unitsPerBox) || 1));
+  const total = Math.max(0, Math.floor(Number(totalUnits) || 0));
+  return {
+    ...item,
+    unitsPerBox: perBox,
+    totalUnits: total,
+    quantity: Math.floor(total / perBox),
+  };
+};
+
+const formatStock = (item) => {
+  const perBox = unitsPerBoxOf(item);
+  const total = totalUnitsOf(item);
+  const boxes = Math.floor(total / perBox);
+  const loose = total % perBox;
+  if (loose === 0) return `${boxes} علبة (${total} حبة)`;
+  return `${boxes} علبة + ${loose} حبة (${total} حبة)`;
+};
+
+const inventorySelect = () => {
+  let columns = INVENTORY_COLUMNS;
+  if (inventorySupportsStorage) columns += ',storage_quality';
+  if (inventorySupportsUnits) columns += ',units_per_box,total_units';
+  return columns;
 };
 
 const INVENTORY_COLUMNS = 'id,name,barcode,batch_no,quantity,price,expiry_date,category,status';
-const LOG_COLUMNS = 'id,timestamp,action,details,type';
+const LOG_COLUMNS = 'id,timestamp,action,details,type,created_at';
 
-const toDbItem = (item) => ({
-  name: item.name,
-  barcode: String(item.barcode ?? ''),
-  batch_no: item.batchNo,
-  quantity: Number(item.quantity) || 0,
-  price: Number(item.price) || 0,
-  expiry_date: item.expiryDate,
-  category: item.category,
-  status: item.status || 'active',
-});
+const toDbItem = (item) => {
+  const perBox = unitsPerBoxOf(item);
+  const total = totalUnitsOf(item);
+  const row = {
+    name: item.name,
+    barcode: String(item.barcode ?? ''),
+    batch_no: item.batchNo,
+    quantity: Math.floor(total / perBox),
+    price: Number(item.price) || 0,
+    expiry_date: item.expiryDate,
+    category: item.category,
+    status: item.status || 'active',
+  };
+  if (inventorySupportsStorage) {
+    row.storage_quality = item.storageQuality || 'حرارة الغرفة';
+  }
+  if (inventorySupportsUnits) {
+    row.units_per_box = perBox;
+    row.total_units = total;
+  }
+  return row;
+};
 
-const fromDbItem = (row) => ({
-  id: row.id,
-  name: row.name,
-  barcode: row.barcode,
-  batchNo: row.batch_no,
-  quantity: Number(row.quantity) || 0,
-  price: Number(row.price) || 0,
-  expiryDate: row.expiry_date,
-  category: row.category,
-  status: row.status,
-});
+const fromDbItem = (row, fallback) => {
+  const fallbackItem = fallback && typeof fallback === 'object' ? fallback : null;
+  const fallbackQuality = typeof fallback === 'string' ? fallback : fallbackItem?.storageQuality;
+  const unitsPerBox = Number(row.units_per_box) || fallbackItem?.unitsPerBox || 1;
+  const hasTotal = row.total_units !== undefined && row.total_units !== null && row.total_units !== '';
+  const totalUnits = hasTotal
+    ? Number(row.total_units)
+    : (fallbackItem?.totalUnits ?? (Number(row.quantity) || 0) * unitsPerBox);
+  return withStock({
+    id: row.id,
+    name: row.name,
+    barcode: row.barcode,
+    batchNo: row.batch_no,
+    price: Number(row.price) || 0,
+    expiryDate: row.expiry_date,
+    category: row.category,
+    status: row.status,
+    storageQuality: row.storage_quality || fallbackQuality || 'حرارة الغرفة',
+  }, totalUnits, unitsPerBox);
+};
 
 const toDbLog = (log) => ({
   timestamp: log.timestamp,
@@ -89,10 +190,88 @@ const toDbLog = (log) => ({
 const fromDbLog = (row) => ({
   id: row.id,
   timestamp: row.timestamp,
+  createdAt: row.created_at || null,
   action: row.action,
   details: sanitizeLogDetails(row.details),
   type: row.type,
 });
+
+const parseArabicDate = (value) => {
+  if (!value) return null;
+  const normalized = String(value)
+    .replace(/[٠-٩]/g, (digit) => '٠١٢٣٤٥٦٧٨٩'.indexOf(digit))
+    .replace(/[^\d/:صم\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const match = normalized.match(/(\d{1,2})\/(\d{1,2})\/(\d{4}).*?(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(ص|م)?/);
+  if (!match) return null;
+  let hour = Number(match[4]);
+  if (match[7] === 'م' && hour < 12) hour += 12;
+  if (match[7] === 'ص' && hour === 12) hour = 0;
+  const date = new Date(Number(match[3]), Number(match[2]) - 1, Number(match[1]), hour, Number(match[5]), Number(match[6] || 0));
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const logDate = (log) => {
+  if (log?.createdAt) {
+    const created = new Date(log.createdAt);
+    if (!Number.isNaN(created.getTime())) return created;
+  }
+  if (typeof log?.id === 'number' && log.id > 1e11) return new Date(log.id);
+  return parseArabicDate(log?.timestamp);
+};
+
+const periodRange = (period, now = new Date()) => {
+  const start = new Date(now);
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(start);
+  if (period === 'weekly') {
+    start.setDate(start.getDate() - ((start.getDay() + 1) % 7));
+    end.setTime(start.getTime());
+    end.setDate(start.getDate() + 7);
+  } else if (period === 'yearly') {
+    start.setMonth(0, 1);
+    end.setFullYear(start.getFullYear() + 1, 0, 1);
+  } else {
+    start.setDate(1);
+    end.setMonth(start.getMonth() + 1, 1);
+  }
+  return { start, end };
+};
+
+const parseDispenseLog = (log) => {
+  const details = String(log.details || '');
+  const fileMatch = details.match(/ملف المريض\s+([^\s—]+)/);
+  const amountMatch = details.match(/صرف\s+(\d+)\s+(حبة|علبة|عبوة)/);
+  const pillsMatch = details.match(/\((\d+)\s+حبة\)/);
+  const nameMatch = details.match(/من\s+(.+?)\s+\(دفعة\s+([^)]+)\)/);
+  const whoMatch = details.match(/الصارف:\s*(.+?)(?:\s+\[|$)/) || details.match(/\[([^\]]+)\]\s*$/);
+  const count = amountMatch ? Number(amountMatch[1]) : 0;
+  const byPill = amountMatch?.[2] === 'حبة';
+  const pills = pillsMatch ? Number(pillsMatch[1]) : (byPill ? count : 0);
+  const quantityLabel = !count
+    ? '—'
+    : byPill
+      ? `${count} حبة`
+      : pills
+        ? `${count} علبة (${pills} حبة)`
+        : `${count} علبة`;
+  return {
+    id: log.id,
+    name: nameMatch?.[1]?.trim() || '—',
+    batch: nameMatch?.[2]?.trim() || '',
+    quantityLabel,
+    pills,
+    boxes: byPill ? 0 : count,
+    fileNo: fileMatch?.[1] || '—',
+    at: logDate(log),
+    who: (whoMatch?.[1] || '—').trim(),
+  };
+};
+
+const formatDateTime = (date) => (
+  date ? date.toLocaleString('ar-SA', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'
+);
 
 const sanitizeLogDetails = (details) => {
   if (!details) return details;
@@ -143,7 +322,11 @@ export default function App() {
   });
 
   const [logFilter, setLogFilter] = useState('all');
+  const [expensePeriod, setExpensePeriod] = useState('weekly');
   const [barcodeInput, setBarcodeInput] = useState('');
+  const [patientFileNumber, setPatientFileNumber] = useState('');
+  const [dispenseQty, setDispenseQty] = useState('');
+  const [dispenseUnit, setDispenseUnit] = useState('box');
   const [scanMode, setScanMode] = useState('dispense');
   const [activeTab, setActiveTab] = useState('all');
   const [message, setMessage] = useState(null);
@@ -154,10 +337,16 @@ export default function App() {
     barcode: '',
     batchNo: '',
     quantity: 10,
+    unitsPerBox: 1,
     price: 10.00,
     expiryDate: '',
-    category: 'أدوية حرجة'
+    category: 'أدوية حرجة',
+    storageQuality: 'حرارة الغرفة',
   });
+  const [editingId, setEditingId] = useState(null);
+  const [entrySlip, setEntrySlip] = useState(null);
+  const [profiles, setProfiles] = useState([]);
+  const [profileDrafts, setProfileDrafts] = useState({});
 
   const barcodeRef = useRef(null);
   const itemsRef = useRef(items);
@@ -165,6 +354,7 @@ export default function App() {
   const remoteReady = useRef(false);
   const pendingInsert = useRef(new Set());
   const syncQueue = useRef(Promise.resolve());
+  const deletedIds = useRef(new Set());
   itemsRef.current = items;
   logsRef.current = logs;
 
@@ -191,9 +381,14 @@ export default function App() {
     let cancelled = false;
 
     const loadRemote = async () => {
+      const storageProbe = await supabase.from('inventory').select('storage_quality').limit(1);
+      inventorySupportsStorage = !storageProbe.error;
+      const unitsProbe = await supabase.from('inventory').select('units_per_box,total_units').limit(1);
+      inventorySupportsUnits = !unitsProbe.error;
+
       const { data: inventoryRows, error: inventoryError } = await supabase
         .from('inventory')
-        .select(INVENTORY_COLUMNS)
+        .select(inventorySelect())
         .order('id', { ascending: true });
 
       if (cancelled) return;
@@ -202,22 +397,25 @@ export default function App() {
         return;
       }
 
+      const remembered = new Map(itemsRef.current.map((item) => [String(item.id), item]));
+      const mapRows = (rows) => (rows || []).map((row) => fromDbItem(row, remembered.get(String(row.id))));
+
       if (inventoryRows.length === 0) {
         const seed = itemsRef.current.map(toDbItem);
         const { data: inserted, error: insertError } = await supabase
           .from('inventory')
           .insert(seed)
-          .select(INVENTORY_COLUMNS);
+          .select(inventorySelect());
         if (cancelled) return;
         if (insertError) {
           console.error(insertError);
           return;
         }
         remoteReady.current = true;
-        setItems((inserted || []).map(fromDbItem));
+        setItems(mapRows(inserted));
       } else {
         remoteReady.current = true;
-        setItems(inventoryRows.map(fromDbItem));
+        setItems(mapRows(inventoryRows));
       }
 
       const { data: logRows, error: logError } = await supabase
@@ -249,6 +447,16 @@ export default function App() {
       }
 
       remoteReady.current = true;
+      const { data: profileRows } = await supabase
+        .from('profiles')
+        .select('id, role, full_name')
+        .eq('role', 'nurse')
+        .order('id', { ascending: true });
+      if (!cancelled && profileRows) {
+        const mapped = mapNurseProfiles(profileRows);
+        setProfiles(mapped);
+        setProfileDrafts(Object.fromEntries(mapped.map((row) => [row.id, row.full_name || ''])));
+      }
     };
 
     loadRemote();
@@ -262,6 +470,10 @@ export default function App() {
       const snapshot = itemsRef.current;
       for (const item of snapshot) {
         const current = itemsRef.current.find((row) => row.id === item.id) || item;
+        if (deletedIds.current.has(current.id)) {
+          await supabase.from('inventory').delete().eq('id', current.id);
+          continue;
+        }
         const payload = toDbItem(current);
         const { data: updated, error: updateError } = await supabase
           .from('inventory')
@@ -281,7 +493,7 @@ export default function App() {
         const { data: inserted, error: insertError } = await supabase
           .from('inventory')
           .insert(payload)
-          .select(INVENTORY_COLUMNS);
+          .select(inventorySelect());
         pendingInsert.current.delete(current.id);
 
         if (insertError) {
@@ -289,7 +501,7 @@ export default function App() {
           continue;
         }
         if (inserted?.[0] && inserted[0].id !== current.id) {
-          setItems((prev) => prev.map((row) => row.id === current.id ? fromDbItem(inserted[0]) : row));
+          setItems((prev) => prev.map((row) => row.id === current.id ? fromDbItem(inserted[0], row) : row));
         }
       }
     };
@@ -303,7 +515,7 @@ export default function App() {
     }
   }, [items, message, activeTab, showAddForm, currentUser]);
 
-  const handleLoginSubmit = (e) => {
+  const handleLoginSubmit = async (e) => {
     e.preventDefault();
     setLoginError('');
 
@@ -313,11 +525,37 @@ export default function App() {
     if (username === 'supervisor' && password === 'Ss@102938') {
       const user = { name: 'مشرف', role: 'supervisor', id: 'ADM-101' };
       setCurrentUser(user);
+      setActiveTab('all');
       addLog('تسجيل دخول', 'تسجيل دخول', 'system', user);
       playSound('success');
-    } else if (username === 'nurse' && password === 'Nn@1234') {
-      const user = { name: 'ممرضة', role: 'nurse', id: 'NRS-408' };
+    } else if (username === 'data_entry' && password === 'Dd@1234') {
+      const user = { name: 'مدخل البيانات', role: 'data_entry', id: 'DATA-1' };
       setCurrentUser(user);
+      setScanMode('checkin');
+      setActiveTab('all');
+      addLog('تسجيل دخول', 'تسجيل دخول', 'system', user);
+      playSound('success');
+    } else if ((username === 'nurse' || NURSE_USERNAMES.includes(username)) && password === 'Nn@1234') {
+      let nurseProfiles = profiles;
+      if (nurseProfiles.length === 0) {
+        const { data } = await supabase
+          .from('profiles')
+          .select('id, role, full_name')
+          .eq('role', 'nurse')
+          .order('id', { ascending: true });
+        nurseProfiles = mapNurseProfiles(data);
+        setProfiles(nurseProfiles);
+        setProfileDrafts(Object.fromEntries(nurseProfiles.map((row) => [row.id, row.full_name || ''])));
+      }
+      const profile = nurseProfiles.find((row) => row.username === username);
+      const user = {
+        name: profile?.full_name || 'ممرضة',
+        role: 'nurse',
+        id: username,
+      };
+      setCurrentUser(user);
+      setScanMode('dispense');
+      setActiveTab('all');
       addLog('تسجيل دخول', 'تسجيل دخول', 'system', user);
       playSound('success');
     } else {
@@ -375,69 +613,96 @@ export default function App() {
     return days > 0 && days <= 30;
   });
   const expiredItems = activeItems.filter(i => calculateExpiryDays(i.expiryDate) <= 0);
-  const lowStockItems = activeItems.filter(i => i.quantity <= 6 && i.quantity > 0);
-  const outOfStockItems = activeItems.filter(i => i.quantity === 0);
+  const lowStockItems = activeItems.filter(i => totalUnitsOf(i) > 0 && Math.floor(totalUnitsOf(i) / unitsPerBoxOf(i)) <= 6);
+  const outOfStockItems = activeItems.filter(i => totalUnitsOf(i) === 0);
 
-  const expiredCount = expiredItems.filter(i => i.quantity > 0).length;
-  const nearExpiryCount = nearExpiryItems.filter(i => i.quantity > 0).length;
+  const expiredCount = expiredItems.filter(i => totalUnitsOf(i) > 0).length;
+  const nearExpiryCount = nearExpiryItems.filter(i => totalUnitsOf(i) > 0).length;
   const lowStockCount = lowStockItems.length;
   const outOfStockCount = outOfStockItems.length;
 
   const handleBarcodeSubmit = (e) => {
     e.preventDefault();
     const scannedCode = barcodeInput.trim();
-    if (!scannedCode) return;
-
-    const matchingBatches = activeItems.filter(i => i.barcode === scannedCode);
-
-    if (matchingBatches.length > 0) {
-      if (scanMode === 'dispense' || currentUser?.role === 'nurse') {
-        const availableBatches = matchingBatches
-          .filter(b => b.quantity > 0 && calculateExpiryDays(b.expiryDate) > 0)
-          .sort((a, b) => calculateExpiryDays(a.expiryDate) - calculateExpiryDays(b.expiryDate));
-
-        if (availableBatches.length > 0) {
-          const targetBatch = availableBatches[0];
-          
-          const updated = items.map(item => 
-            item.id === targetBatch.id ? { ...item, quantity: item.quantity - 1 } : item
-          );
-          
-          setItems(updated);
-          playSound('success');
-          const daysLeft = calculateExpiryDays(targetBatch.expiryDate);
-          let alertNote = daysLeft <= 30 ? " ⚠️ (صرف تلقائي من الدفعة الأقرب انتهاءً)" : "";
-          const msg = `تم صرف عبوة من: ${targetBatch.name} [دفعة: ${targetBatch.batchNo}]${alertNote}`;
-          showMessage(msg, 'success');
-          addLog('صرف دواء', `صرف 1 عبوة من ${targetBatch.name} (دفعة ${targetBatch.batchNo})`, 'dispense');
-        } else {
-          playSound('error');
-          const expiredMatch = matchingBatches.find(b => b.quantity > 0 && calculateExpiryDays(b.expiryDate) <= 0);
-          if (expiredMatch) {
-            showMessage(`❌ تنبيه أمني: الدفعة المتبقية من (${expiredMatch.name}) منتهية الصلاحية!`, 'error');
-            addLog('تنبيه أمني', `محاولة صرف دواء منتهي الصلاحية: ${expiredMatch.name}`, 'alert');
-          } else {
-            showMessage(`عذراً، جميع دفعات هذا الدواء نافدة تماماً!`, 'error');
-          }
-        }
-      } else {
-        const sortedByNewest = [...matchingBatches].sort((a, b) => calculateExpiryDays(b.expiryDate) - calculateExpiryDays(a.expiryDate));
-        const targetBatch = sortedByNewest[0];
-
-        const updated = items.map(item => 
-          item.id === targetBatch.id ? { ...item, quantity: item.quantity + 1 } : item
-        );
-
-        setItems(updated);
-        playSound('success');
-        showMessage(`تم زيادة مخزون: ${targetBatch.name} [دفعة: ${targetBatch.batchNo}]`, 'success');
-        addLog('إضافة مخزون', `إضافة 1 عبوة لـ ${targetBatch.name} (دفعة ${targetBatch.batchNo})`, 'checkin');
-      }
-    } else {
+    if (!scannedCode) {
+      showMessage('امسحي الباركود قبل حفظ العملية.', 'error');
       playSound('error');
-      showMessage(`الباركود (${scannedCode}) غير مسجل في النظام!`, 'error');
+      return;
     }
 
+    if (currentUser?.role === 'data_entry') {
+      showMessage('صلاحية مدخل البيانات لا تشمل الصرف.', 'error');
+      return;
+    }
+
+    const dispensing = scanMode === 'dispense' || currentUser?.role === 'nurse';
+    const matchingBatches = activeItems.filter(i => i.barcode === scannedCode);
+
+    if (matchingBatches.length === 0) {
+      playSound('error');
+      showMessage(`الباركود (${scannedCode}) غير مسجل في النظام!`, 'error');
+      return;
+    }
+
+    if (dispensing) {
+      const fileNo = patientFileNumber.trim();
+      const count = Number(dispenseQty);
+      if (!fileNo || !Number.isInteger(count) || count < 1) {
+        playSound('error');
+        showMessage('لا يُحفظ الصرف إلا بعد إدخال رقم ملف المريض والكمية والوحدة.', 'error');
+        return;
+      }
+
+      const availableBatches = matchingBatches
+        .filter(b => totalUnitsOf(b) > 0 && calculateExpiryDays(b.expiryDate) > 0)
+        .sort((a, b) => calculateExpiryDays(a.expiryDate) - calculateExpiryDays(b.expiryDate));
+
+      if (availableBatches.length === 0) {
+        playSound('error');
+        const expiredMatch = matchingBatches.find(b => totalUnitsOf(b) > 0 && calculateExpiryDays(b.expiryDate) <= 0);
+        if (expiredMatch) {
+          showMessage(`❌ تنبيه أمني: الدفعة المتبقية من (${expiredMatch.name}) منتهية الصلاحية!`, 'error');
+          addLog('تنبيه أمني', `محاولة صرف دواء منتهي الصلاحية: ${expiredMatch.name} — ملف ${fileNo}`, 'alert');
+        } else {
+          showMessage('عذراً، جميع دفعات هذا الدواء نافدة تماماً!', 'error');
+        }
+        return;
+      }
+
+      const targetBatch = availableBatches[0];
+      const perBox = unitsPerBoxOf(targetBatch);
+      const pills = dispenseUnit === 'box' ? count * perBox : count;
+      const available = totalUnitsOf(targetBatch);
+      if (pills > available) {
+        playSound('error');
+        showMessage(`الكمية المطلوبة ${pills} حبة، والمتاح في الدفعة ${targetBatch.batchNo} هو ${available} حبة فقط.`, 'error');
+        return;
+      }
+
+      const updatedBatch = withStock(targetBatch, available - pills, perBox);
+      setItems(items.map(item => item.id === targetBatch.id ? updatedBatch : item));
+      playSound('success');
+      const daysLeft = calculateExpiryDays(targetBatch.expiryDate);
+      const unitLabel = dispenseUnit === 'box' ? 'علبة' : 'حبة';
+      const alertNote = daysLeft <= 30 ? ' ⚠️ (صرف تلقائي من الدفعة الأقرب انتهاءً)' : '';
+      showMessage(`تم صرف ${count} ${unitLabel} (${pills} حبة) من ${targetBatch.name}. المتبقي ${updatedBatch.totalUnits} حبة.${alertNote}`, 'success');
+      addLog(
+        'صرف دواء',
+        `ملف المريض ${fileNo} — صرف ${count} ${unitLabel} (${pills} حبة) من ${targetBatch.name} (دفعة ${targetBatch.batchNo}). المتبقي ${updatedBatch.totalUnits} حبة. الصارف: ${dispenserLabel(currentUser)}`,
+        'dispense'
+      );
+      setBarcodeInput('');
+      setDispenseQty('');
+      return;
+    }
+
+    const sortedByNewest = [...matchingBatches].sort((a, b) => calculateExpiryDays(b.expiryDate) - calculateExpiryDays(a.expiryDate));
+    const targetBatch = sortedByNewest[0];
+    const updatedBatch = withStock(targetBatch, totalUnitsOf(targetBatch) + unitsPerBoxOf(targetBatch));
+    setItems(items.map(item => item.id === targetBatch.id ? updatedBatch : item));
+    playSound('success');
+    showMessage(`تم زيادة مخزون: ${targetBatch.name} [دفعة: ${targetBatch.batchNo}] بمقدار علبة واحدة (${unitsPerBoxOf(targetBatch)} حبة).`, 'success');
+    addLog('إضافة مخزون', `إضافة 1 علبة (${unitsPerBoxOf(targetBatch)} حبة) لـ ${targetBatch.name} (دفعة ${targetBatch.batchNo})`, 'checkin');
     setBarcodeInput('');
   };
 
@@ -451,7 +716,7 @@ export default function App() {
     if (!target) return;
 
     if (window.confirm(`هل أنتِ متأكدة من إتلاف واستبعاد الدفعة (${target.batchNo}) لـ (${target.name})؟`)) {
-      const updated = items.map(i => i.id === id ? { ...i, quantity: 0, status: 'disposed' } : i);
+      const updated = items.map(i => i.id === id ? withStock({ ...i, status: 'disposed' }, 0) : i);
       setItems(updated);
       playSound('success');
       showMessage(`🗑️ تم نقل الدفعة (${target.batchNo}) إلى سجل التالف والمستبعد.`, 'success');
@@ -459,36 +724,129 @@ export default function App() {
     }
   };
 
+  const resetItemForm = () => {
+    setEditingId(null);
+    setNewItem({
+      name: '',
+      barcode: '',
+      batchNo: '',
+      quantity: 10,
+      unitsPerBox: 1,
+      price: 10.00,
+      expiryDate: '',
+      category: 'أدوية حرجة',
+      storageQuality: 'حرارة الغرفة',
+    });
+  };
+
+  const openEditItem = (item) => {
+    setEditingId(item.id);
+    setNewItem({
+      name: item.name,
+      barcode: item.barcode,
+      batchNo: item.batchNo,
+      quantity: item.quantity,
+      unitsPerBox: unitsPerBoxOf(item),
+      price: item.price,
+      expiryDate: item.expiryDate,
+      category: item.category,
+      storageQuality: item.storageQuality || 'حرارة الغرفة',
+    });
+    setShowAddForm(true);
+    setActiveTab('all');
+  };
+
+  const handleDeleteItem = (id) => {
+    if (!canManageItems(currentUser)) return;
+    const target = items.find((item) => item.id === id);
+    if (!target) return;
+    if (!window.confirm(`هل تريد حذف الصنف (${target.name}) دفعة ${target.batchNo}؟`)) return;
+    deletedIds.current.add(id);
+    supabase.from('inventory').delete().eq('id', id).then(({ error }) => {
+      if (error) console.error(error);
+    });
+    setItems((prev) => prev.filter((item) => item.id !== id));
+    if (editingId === id) {
+      resetItemForm();
+      setShowAddForm(false);
+    }
+    playSound('success');
+    showMessage(`تم حذف الصنف (${target.name}).`, 'success');
+    addLog('حذف صنف', `حذف ${target.name} (دفعة ${target.batchNo})`, 'delete');
+  };
+
   const handleAddNewItemSubmit = (e) => {
     e.preventDefault();
-    if (currentUser?.role !== 'supervisor') {
-      alert("عذراً، إضافة أصناف جديدة مقتصرة على المشرف أو الصيدلي فقط!");
+    if (!canManageItems(currentUser)) {
+      alert('إضافة الأصناف وتعديلها متاحة للمشرف ومدخل البيانات فقط.');
       return;
     }
 
-    if (!newItem.name || !newItem.barcode || !newItem.batchNo || !newItem.expiryDate) {
-      alert("يرجى ملء جميع الحقول المطلوبة!");
+    const perBox = Math.floor(Number(newItem.unitsPerBox));
+    if (!newItem.name || !newItem.barcode || !newItem.batchNo || !newItem.expiryDate || !newItem.storageQuality || perBox < 1) {
+      alert('يرجى ملء جميع الحقول المطلوبة، بما فيها جودة الحفظ وعدد حبات العلبة.');
       return;
     }
 
-    const itemToAdd = {
-      id: Date.now(),
+    const previous = items.find((item) => item.id === editingId);
+    const boxes = Math.max(0, Math.floor(Number(newItem.quantity) || 0));
+    const loose = previous && unitsPerBoxOf(previous) === perBox ? totalUnitsOf(previous) % perBox : 0;
+    const savedItem = withStock({
+      id: editingId || Date.now(),
       name: newItem.name,
       barcode: newItem.barcode.trim(),
       batchNo: newItem.batchNo.trim(),
-      quantity: Number(newItem.quantity),
       price: Number(newItem.price) || 0,
       expiryDate: newItem.expiryDate,
       category: newItem.category,
-      status: 'active'
-    };
+      storageQuality: newItem.storageQuality,
+      status: previous?.status || 'active',
+    }, boxes * perBox + loose, perBox);
 
-    setItems([...items, itemToAdd]);
+    if (editingId) {
+      setItems((prev) => prev.map((item) => item.id === editingId ? { ...item, ...savedItem } : item));
+      showMessage(`تم تعديل الصنف (${savedItem.name}).`, 'success');
+      addLog('تعديل صنف', `تعديل ${savedItem.name} (دفعة ${savedItem.batchNo}) — ${savedItem.unitsPerBox} حبة/علبة — ${savedItem.storageQuality}`, 'edit');
+    } else {
+      setItems((prev) => [...prev, savedItem]);
+      showMessage(`تم إضافة الصنف (${savedItem.name}).`, 'success');
+      addLog('تسجيل صنف', `تسجيل شحنة جديدة: ${savedItem.name} (كمية ${savedItem.quantity} علبة × ${savedItem.unitsPerBox} حبة) — ${savedItem.storageQuality}`, 'add');
+    }
+
+    setEntrySlip({ ...savedItem, action: editingId ? 'تعديل' : 'إدخال' });
     setShowAddForm(false);
+    resetItemForm();
+    if (currentUser?.role === 'data_entry') setActiveTab('entryReport');
     playSound('success');
-    setNewItem({ name: '', barcode: '', batchNo: '', quantity: 10, price: 10.00, expiryDate: '', category: 'أدوية حرجة' });
-    showMessage(`✨ تم إضافة الدواء الجديد (${itemToAdd.name}) بنجاح!`, 'success');
-    addLog('تسجيل صنف', `تسجيل شحنة جديدة: ${itemToAdd.name} (كمية ${itemToAdd.quantity}) بسعر ${itemToAdd.price} ر.س`, 'add');
+  };
+
+  const handleSaveProfiles = async () => {
+    if (currentUser?.role !== 'supervisor') return;
+    let failed = false;
+    const next = [];
+    for (const profile of profiles) {
+      const fullName = (profileDrafts[profile.id] || '').trim();
+      if (!fullName) {
+        alert(`اسم الحساب ${profile.username} مطلوب.`);
+        return;
+      }
+      const { error } = await supabase
+        .from('profiles')
+        .update({ full_name: fullName })
+        .eq('id', profile.id);
+      if (error) {
+        console.error(error);
+        failed = true;
+      }
+      next.push({ ...profile, full_name: fullName });
+    }
+    if (failed) {
+      showMessage('تعذر حفظ بعض الأسماء في جدول الحسابات.', 'error');
+      return;
+    }
+    setProfiles(next);
+    showMessage('تم حفظ أسماء حسابات التمريض.', 'success');
+    addLog('تعديل حسابات', 'تحديث أسماء حسابات التمريض', 'system');
   };
 
   const showMessage = (text, type) => {
@@ -499,7 +857,7 @@ export default function App() {
   const filteredItems = items.filter(item => {
     if (activeTab === 'disposed') return item.status === 'disposed';
     if (item.status !== 'active') return false;
-    if (activeTab === 'lowStock') return item.quantity <= 6;
+    if (activeTab === 'lowStock') return totalUnitsOf(item) > 0 && Math.floor(totalUnitsOf(item) / unitsPerBoxOf(item)) <= 6;
     if (activeTab === 'expiryAlert') return calculateExpiryDays(item.expiryDate) <= 30;
     return true;
   });
@@ -508,6 +866,16 @@ export default function App() {
     if (logFilter === 'all') return true;
     return log.type === logFilter;
   });
+
+  const expenseWindow = periodRange(expensePeriod);
+  const expenseRows = logs
+    .filter((log) => log.type === 'dispense' || log.action === 'صرف دواء')
+    .map(parseDispenseLog)
+    .filter((row) => row.at && row.at >= expenseWindow.start && row.at < expenseWindow.end)
+    .sort((a, b) => b.at - a.at);
+  const expensePillTotal = expenseRows.reduce((sum, row) => sum + row.pills, 0);
+  const expenseBoxTotal = expenseRows.reduce((sum, row) => sum + row.boxes, 0);
+  const expensePeriodTitle = expensePeriod === 'weekly' ? 'الأسبوعي' : expensePeriod === 'yearly' ? 'السنوي' : 'الشهري';
 
   if (!currentUser) {
     return (
@@ -598,7 +966,8 @@ export default function App() {
             transform: none !important;
           }
           #printable-report,
-          #printable-logs {
+          #printable-logs,
+          #printable-entry {
             display: block !important;
             position: static !important;
             visibility: visible !important;
@@ -609,13 +978,15 @@ export default function App() {
             padding: 0 !important;
           }
           #printable-report *,
-          #printable-logs * {
+          #printable-logs *,
+          #printable-entry * {
             visibility: visible !important;
             -webkit-print-color-adjust: exact;
             print-color-adjust: exact;
           }
           #printable-report table,
-          #printable-logs table {
+          #printable-logs table,
+          #printable-entry table {
             width: 100% !important;
             border-collapse: collapse !important;
             page-break-inside: auto;
@@ -623,21 +994,26 @@ export default function App() {
           #printable-report th,
           #printable-report td,
           #printable-logs th,
-          #printable-logs td {
+          #printable-logs td,
+          #printable-entry th,
+          #printable-entry td {
             border: 1px solid #333 !important;
             color: #000 !important;
             background: #fff !important;
           }
           #printable-report tr,
           #printable-logs tr,
+          #printable-entry tr,
           #printable-report h2,
           #printable-report h3,
-          #printable-logs h2 {
+          #printable-logs h2,
+          #printable-entry h2 {
             break-inside: avoid;
             page-break-inside: avoid;
           }
           #printable-report thead,
-          #printable-logs thead { display: table-header-group; }
+          #printable-logs thead,
+          #printable-entry thead { display: table-header-group; }
           .print-only { display: block !important; }
           .print-sign {
             display: grid !important;
@@ -661,21 +1037,38 @@ export default function App() {
             <div>
               <h1 className="text-2xl font-black text-slate-900 tracking-tight">نظام متابعة أدوية الطوارئ الذكي</h1>
               <p className="text-xs text-emerald-600 font-semibold mt-0.5">
-                المستخدم الحالي: <span className="font-bold text-slate-800">{actorLabel(currentUser)}</span>
+                المستخدم الحالي: <span className="font-bold text-slate-800">{currentUser.role === 'nurse' && currentUser.name && currentUser.name !== 'ممرضة' ? `${currentUser.name} — ${actorLabel(currentUser)}` : actorLabel(currentUser)}</span>
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-3 flex-wrap">
-            {currentUser.role === 'supervisor' && (
+            {(currentUser.role === 'supervisor' || currentUser.role === 'data_entry') && (
               <>
                 <button
-                  onClick={() => setShowAddForm(!showAddForm)}
+                  onClick={() => {
+                    if (showAddForm) {
+                      setShowAddForm(false);
+                      resetItemForm();
+                    } else {
+                      resetItemForm();
+                      setShowAddForm(true);
+                    }
+                  }}
                   className="px-4 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 hover:to-teal-400 text-white font-bold rounded-2xl text-xs shadow-lg transition flex items-center gap-1.5"
                 >
                   <span>{showAddForm ? '✕ إغلاق' : '✨ إضافة صنف'}</span>
                 </button>
-
+                <button
+                  onClick={() => setActiveTab('entryReport')}
+                  className="px-4 py-2.5 bg-white hover:bg-slate-50 text-slate-700 font-bold rounded-2xl text-xs border border-slate-200/80 shadow-md transition flex items-center gap-1.5"
+                >
+                  <span>🖨️ تقرير الإدخال</span>
+                </button>
+              </>
+            )}
+            {currentUser.role === 'supervisor' && (
+              <>
                 <button
                   onClick={() => setActiveTab('logs')}
                   className="px-4 py-2.5 bg-white hover:bg-slate-50 text-slate-700 font-bold rounded-2xl text-xs border border-slate-200/80 shadow-md transition flex items-center gap-1.5"
@@ -688,6 +1081,12 @@ export default function App() {
                   className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-2xl text-xs shadow-md transition flex items-center gap-1.5"
                 >
                   <span>📊 التقارير / PDF</span>
+                </button>
+                <button
+                  onClick={() => setActiveTab('settings')}
+                  className="px-4 py-2.5 bg-white hover:bg-slate-50 text-slate-700 font-bold rounded-2xl text-xs border border-slate-200/80 shadow-md transition flex items-center gap-1.5"
+                >
+                  <span>⚙️ الإعدادات</span>
                 </button>
               </>
             )}
@@ -702,13 +1101,13 @@ export default function App() {
         </header>
 
         {/* نموذج الإضافة للمشرف فقط */}
-        {showAddForm && currentUser.role === 'supervisor' && (
+        {showAddForm && canManageItems(currentUser) && (
           <div className="bg-white/90 backdrop-blur-xl border border-emerald-500/30 p-6 rounded-3xl shadow-2xl space-y-4 no-print animate-in fade-in zoom-in-95 duration-300">
             <div className="flex justify-between items-center border-b border-slate-100 pb-3">
               <h3 className="font-bold text-base text-emerald-700 flex items-center gap-2">
-                <span>💊</span> إضافة صنف أو شحنة دواء جديدة للمخزون (صلاحية مشرف)
+                <span>💊</span> {editingId ? 'تعديل الصنف' : 'إضافة صنف أو شحنة جديدة'}
               </h3>
-              <button onClick={() => setShowAddForm(false)} className="text-slate-400 hover:text-slate-700 font-bold">✕</button>
+              <button onClick={() => { setShowAddForm(false); resetItemForm(); }} className="text-slate-400 hover:text-slate-700 font-bold">✕</button>
             </div>
 
             <form onSubmit={handleAddNewItemSubmit} className="space-y-4 text-xs md:text-sm">
@@ -763,10 +1162,10 @@ export default function App() {
                   />
                 </div>
                 <div>
-                  <label className="block text-slate-700 font-bold mb-1">الكمية *</label>
+                  <label className="block text-slate-700 font-bold mb-1">عدد العلب *</label>
                   <input
                     type="number"
-                    min="1"
+                    min="0"
                     required
                     value={newItem.quantity}
                     onChange={(e) => setNewItem({ ...newItem, quantity: e.target.value })}
@@ -797,12 +1196,40 @@ export default function App() {
                 </div>
               </div>
 
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-slate-700 font-bold mb-1">حبات العلبة الواحدة *</label>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    required
+                    value={newItem.unitsPerBox}
+                    onChange={(e) => setNewItem({ ...newItem, unitsPerBox: e.target.value })}
+                    className="w-full px-4 py-3 bg-slate-50/80 border border-slate-200 rounded-2xl text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 transition"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-700 font-bold mb-1">جودة الحفظ *</label>
+                <select
+                  required
+                  value={newItem.storageQuality}
+                  onChange={(e) => setNewItem({ ...newItem, storageQuality: e.target.value })}
+                  className="w-full px-4 py-3 bg-slate-50/80 border border-slate-200 rounded-2xl text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 transition"
+                >
+                  {STORAGE_OPTIONS.map((option) => (
+                    <option key={option} value={option}>{option}</option>
+                  ))}
+                </select>
+                </div>
+              </div>
+
               <div className="flex justify-end gap-2 pt-2">
                 <button
                   type="submit"
                   className="px-6 py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-2xl transition shadow-lg shadow-emerald-600/20"
                 >
-                  تأكيد وحفظ الدفعة
+                  {editingId ? 'حفظ التعديل' : 'تأكيد وحفظ الدفعة'}
                 </button>
               </div>
             </form>
@@ -810,6 +1237,7 @@ export default function App() {
         )}
 
         {/* المؤشرات */}
+        {currentUser.role !== 'data_entry' && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 no-print">
           <div className="bg-white/80 backdrop-blur-xl p-5 rounded-3xl border border-red-100 shadow-xl shadow-red-500/5 hover:-translate-y-1 transition-all duration-300">
             <div className="flex items-center justify-between">
@@ -847,9 +1275,17 @@ export default function App() {
             <p className="text-[11px] text-slate-400 font-semibold mt-1">غير متوفر بالقسم</p>
           </div>
         </div>
+        )}
 
         {/* الكارت الرئيسي */}
         <div className="bg-white/90 backdrop-blur-xl rounded-3xl shadow-2xl shadow-slate-200/60 border border-white/80 overflow-hidden">
+          {message && (
+            <div className={`m-4 p-3.5 rounded-2xl text-xs font-bold no-print ${
+              message.type === 'success' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-red-50 text-red-700 border border-red-200'
+            }`}>
+              {message.text}
+            </div>
+          )}
           
           {/* تبويبات الفلترة */}
           <div className="p-4 bg-slate-50/60 border-b border-slate-100 flex flex-wrap gap-2 no-print">
@@ -879,6 +1315,17 @@ export default function App() {
             >
               تنبيه الصلاحية (≤30 يوم)
             </button>
+
+            {canManageItems(currentUser) && (
+              <button
+                onClick={() => setActiveTab('entryReport')}
+                className={`px-5 py-2.5 rounded-2xl text-xs md:text-sm font-bold transition-all ${
+                  activeTab === 'entryReport' ? 'bg-emerald-600 text-white shadow-lg' : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200/60'
+                }`}
+              >
+                🖨️ تقرير الإدخال الفوري
+              </button>
+            )}
 
             {/* مقتصر على المشرف */}
             {currentUser.role === 'supervisor' && (
@@ -1004,6 +1451,65 @@ export default function App() {
                 </div>
 
                 <div className="space-y-2">
+                  <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                    <h3 className="font-bold text-xs text-sky-900 bg-sky-50 p-2 rounded-lg border border-sky-200">💊 تقرير المصروفات {expensePeriodTitle}</h3>
+                    <div className="flex flex-wrap gap-2 no-print">
+                      {[
+                        ['weekly', 'تقرير أسبوعي'],
+                        ['monthly', 'تقرير شهري'],
+                        ['yearly', 'تقرير سنوي'],
+                      ].map(([period, label]) => (
+                        <button
+                          key={period}
+                          type="button"
+                          onClick={() => setExpensePeriod(period)}
+                          className={`px-4 py-2 rounded-xl text-xs font-bold ${
+                            expensePeriod === period ? 'bg-sky-700 text-white' : 'bg-white text-slate-600 border border-slate-200'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <p className="text-xs text-slate-500">
+                    من {expenseWindow.start.toLocaleDateString('ar-SA')} إلى {new Date(expenseWindow.end.getTime() - 1).toLocaleDateString('ar-SA')}
+                    {' '}— {expenseRows.length} عملية صرف
+                    {expenseBoxTotal ? ` — ${expenseBoxTotal} علبة` : ''}
+                    {expensePillTotal ? ` — ${expensePillTotal} حبة` : ''}
+                  </p>
+                  <table className="w-full text-right border-collapse border border-slate-300 text-xs">
+                    <thead>
+                      <tr className="bg-sky-100">
+                        <th className="p-2 border">اسم الدواء</th>
+                        <th className="p-2 border">الكمية المصروفة</th>
+                        <th className="p-2 border">رقم ملف المريض</th>
+                        <th className="p-2 border">تاريخ ووقت الصرف</th>
+                        <th className="p-2 border">من صرفه</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {expenseRows.length === 0 ? (
+                        <tr>
+                          <td colSpan="5" className="p-4 border text-center text-slate-500">لا توجد عمليات صرف في هذه الفترة.</td>
+                        </tr>
+                      ) : expenseRows.map((row) => (
+                        <tr key={row.id}>
+                          <td className="p-2 border font-semibold">
+                            {row.name}
+                            {row.batch ? <div className="text-[11px] font-mono text-slate-500">دفعة {row.batch}</div> : null}
+                          </td>
+                          <td className="p-2 border font-bold">{row.quantityLabel}</td>
+                          <td className="p-2 border font-mono">{row.fileNo}</td>
+                          <td className="p-2 border">{formatDateTime(row.at)}</td>
+                          <td className="p-2 border">{row.who}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="space-y-2">
                   <h3 className="font-bold text-xs text-emerald-800 bg-emerald-50 p-2 rounded-lg border border-emerald-200">🟢 1. الأدوية والدفعات الصالحة</h3>
                   <table className="w-full text-right border-collapse border border-slate-300 text-xs">
                     <thead>
@@ -1011,7 +1517,7 @@ export default function App() {
                     </thead>
                     <tbody>
                       {validItems.map(i => (
-                        <tr key={i.id}><td className="p-2 border font-semibold">{i.name}</td><td className="p-2 border font-mono">{i.batchNo}</td><td className="p-2 border">{i.quantity} علبة</td><td className="p-2 border font-mono">{i.price ? i.price.toFixed(2) : '0.00'}</td><td className="p-2 border font-mono">{i.expiryDate}</td></tr>
+                        <tr key={i.id}><td className="p-2 border font-semibold">{i.name}</td><td className="p-2 border font-mono">{i.batchNo}</td><td className="p-2 border">{formatStock(i)}</td><td className="p-2 border font-mono">{i.price ? i.price.toFixed(2) : '0.00'}</td><td className="p-2 border font-mono">{i.expiryDate}</td></tr>
                       ))}
                     </tbody>
                   </table>
@@ -1025,7 +1531,7 @@ export default function App() {
                     </thead>
                     <tbody>
                       {nearExpiryItems.map(i => (
-                        <tr key={i.id}><td className="p-2 border font-semibold">{i.name}</td><td className="p-2 border font-mono">{i.batchNo}</td><td className="p-2 border">{i.quantity} علبة</td><td className="p-2 border font-mono">{i.price ? i.price.toFixed(2) : '0.00'}</td><td className="p-2 border font-mono font-bold text-amber-800">{i.expiryDate}</td></tr>
+                        <tr key={i.id}><td className="p-2 border font-semibold">{i.name}</td><td className="p-2 border font-mono">{i.batchNo}</td><td className="p-2 border">{formatStock(i)}</td><td className="p-2 border font-mono">{i.price ? i.price.toFixed(2) : '0.00'}</td><td className="p-2 border font-mono font-bold text-amber-800">{i.expiryDate}</td></tr>
                       ))}
                     </tbody>
                   </table>
@@ -1046,9 +1552,82 @@ export default function App() {
                 </div>
               </div>
             </div>
+          ) : activeTab === 'settings' && currentUser.role === 'supervisor' ? (
+            <div className="p-6 space-y-5 bg-white">
+              <div>
+                <h2 className="text-xl font-black text-slate-900">إعدادات حسابات التمريض</h2>
+                <p className="text-xs text-slate-500 mt-1">تعديل أسماء الحسابات nurse_1 حتى nurse_4 وحفظها في جدول الحسابات.</p>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {profiles.map((profile) => (
+                  <div key={profile.id}>
+                    <label htmlFor={`nurse-name-${profile.id}`} className="block text-slate-700 font-bold mb-1 text-sm">{profile.username}</label>
+                    <input
+                      id={`nurse-name-${profile.id}`}
+                      type="text"
+                      value={profileDrafts[profile.id] || ''}
+                      onChange={(e) => setProfileDrafts({ ...profileDrafts, [profile.id]: e.target.value })}
+                      className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-slate-800"
+                    />
+                  </div>
+                ))}
+              </div>
+              {profiles.length === 0 && (
+                <p className="text-sm text-slate-500">لا توجد حسابات تمريض في الجدول حالياً.</p>
+              )}
+              <button
+                type="button"
+                onClick={handleSaveProfiles}
+                className="px-6 py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-2xl text-sm"
+              >
+                حفظ الأسماء
+              </button>
+            </div>
+          ) : activeTab === 'entryReport' && canManageItems(currentUser) ? (
+            <div className="p-6 space-y-4 bg-white">
+              <div className="flex justify-between items-center no-print border-b pb-4">
+                <div>
+                  <h2 className="text-xl font-black text-slate-900">تقرير الإدخال الفوري</h2>
+                  <p className="text-xs text-slate-500 mt-1">يظهر آخر صنف تم إدخاله أو تعديله، وهو جاهز للطباعة.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => window.print()}
+                  className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-2xl text-xs"
+                >
+                  🖨️ طباعة التقرير
+                </button>
+              </div>
+              <div id="printable-entry" className="print-sheet space-y-4">
+                {entrySlip ? (
+                  <>
+                    <div className="text-center border-b pb-3">
+                      <h2 className="text-2xl font-black">تقرير {entrySlip.action} صنف</h2>
+                      <p className="text-xs text-slate-500 mt-1">{new Date().toLocaleString('ar-SA')} | {actorLabel(currentUser)}</p>
+                    </div>
+                    <table className="w-full text-right border-collapse border border-slate-300 text-sm">
+                      <tbody>
+                        <tr><th className="p-2 border bg-slate-50 w-40">اسم الصنف</th><td className="p-2 border">{entrySlip.name}</td></tr>
+                        <tr><th className="p-2 border bg-slate-50">رقم الدفعة</th><td className="p-2 border font-mono">{entrySlip.batchNo}</td></tr>
+                        <tr><th className="p-2 border bg-slate-50">الباركود</th><td className="p-2 border font-mono">{entrySlip.barcode}</td></tr>
+                        <tr><th className="p-2 border bg-slate-50">الكمية</th><td className="p-2 border">{entrySlip.quantity} علبة</td></tr>
+                        <tr><th className="p-2 border bg-slate-50">حبات العلبة</th><td className="p-2 border">{entrySlip.unitsPerBox || 1}</td></tr>
+                        <tr><th className="p-2 border bg-slate-50">إجمالي الحبات</th><td className="p-2 border">{entrySlip.totalUnits ?? ((entrySlip.quantity || 0) * (entrySlip.unitsPerBox || 1))}</td></tr>
+                        <tr><th className="p-2 border bg-slate-50">السعر</th><td className="p-2 border">{Number(entrySlip.price || 0).toFixed(2)} ر.س</td></tr>
+                        <tr><th className="p-2 border bg-slate-50">تاريخ الانتهاء</th><td className="p-2 border">{entrySlip.expiryDate}</td></tr>
+                        <tr><th className="p-2 border bg-slate-50">الفئة</th><td className="p-2 border">{entrySlip.category}</td></tr>
+                        <tr><th className="p-2 border bg-slate-50">جودة الحفظ</th><td className="p-2 border font-bold">{entrySlip.storageQuality}</td></tr>
+                      </tbody>
+                    </table>
+                  </>
+                ) : (
+                  <p className="text-sm text-slate-500">لا يوجد إدخال للطباعة بعد. أضيفي صنفاً أو عدّليه أولاً.</p>
+                )}
+              </div>
+            </div>
           ) : (
             <>
-              {/* منصة المسح بالباركود */}
+              {currentUser.role !== 'data_entry' && (
               <div className="p-6 bg-slate-900 text-white">
                 <div className="flex flex-col md:flex-row gap-4 items-center">
                   <div className="flex bg-slate-800/80 p-1.5 rounded-2xl w-full md:w-auto border border-slate-700/50">
@@ -1075,7 +1654,7 @@ export default function App() {
                     )}
                   </div>
 
-                  <form onSubmit={handleBarcodeSubmit} className="flex-1 flex gap-2 w-full">
+                  <form onSubmit={handleBarcodeSubmit} className="flex-1 flex flex-col gap-3 w-full">
                     <input
                       ref={barcodeRef}
                       type="text"
@@ -1084,20 +1663,48 @@ export default function App() {
                       onChange={(e) => setBarcodeInput(e.target.value)}
                       className="w-full px-5 py-3 bg-slate-800/90 border border-slate-700 rounded-2xl text-white font-mono placeholder-slate-500 focus:outline-none focus:border-emerald-400 text-sm transition"
                     />
-                    <button type="submit" className="px-6 py-3 bg-emerald-500 hover:bg-emerald-400 text-slate-900 font-extrabold rounded-2xl text-xs transition shadow-lg">
-                      تنفيذ
-                    </button>
+                    {(scanMode === 'dispense' || currentUser.role === 'nurse') ? (
+                      <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
+                        <input
+                          type="text"
+                          required
+                          placeholder="رقم ملف المريض *"
+                          value={patientFileNumber}
+                          onChange={(e) => setPatientFileNumber(e.target.value)}
+                          className="md:col-span-2 w-full px-5 py-3 bg-slate-800/90 border border-slate-700 rounded-2xl text-white placeholder-slate-500 focus:outline-none focus:border-emerald-400 text-sm"
+                        />
+                        <input
+                          type="number"
+                          required
+                          min="1"
+                          step="1"
+                          placeholder="العدد *"
+                          value={dispenseQty}
+                          onChange={(e) => setDispenseQty(e.target.value)}
+                          className="w-full px-5 py-3 bg-slate-800/90 border border-slate-700 rounded-2xl text-white placeholder-slate-500 focus:outline-none focus:border-emerald-400 text-sm"
+                        />
+                        <select
+                          required
+                          value={dispenseUnit}
+                          onChange={(e) => setDispenseUnit(e.target.value)}
+                          className="w-full px-4 py-3 bg-slate-800/90 border border-slate-700 rounded-2xl text-white text-sm"
+                        >
+                          <option value="box">بالعلبة</option>
+                          <option value="pill">بالحبة</option>
+                        </select>
+                        <button type="submit" className="md:col-span-4 px-6 py-3 bg-emerald-500 hover:bg-emerald-400 text-slate-900 font-extrabold rounded-2xl text-xs transition shadow-lg">
+                          تأكيد الصرف
+                        </button>
+                      </div>
+                    ) : (
+                      <button type="submit" className="px-6 py-3 bg-emerald-500 hover:bg-emerald-400 text-slate-900 font-extrabold rounded-2xl text-xs transition shadow-lg">
+                        تنفيذ الإدخال
+                      </button>
+                    )}
                   </form>
                 </div>
-
-                {message && (
-                  <div className={`mt-3 p-3.5 rounded-2xl text-xs font-bold ${
-                    message.type === 'success' ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-800' : 'bg-red-950/80 text-red-300 border border-red-800'
-                  }`}>
-                    {message.text}
-                  </div>
-                )}
               </div>
+              )}
 
               {/* جدول المخزون الرئيسي بعمود السعر */}
               <div className="overflow-x-auto">
@@ -1108,8 +1715,10 @@ export default function App() {
                       <th className="py-4 px-5">رقم الدفعة (Batch)</th>
                       <th className="py-4 px-5">الباركود</th>
                       <th className="py-4 px-5">الكمية</th>
+                      <th className="py-4 px-5">حبات العلبة</th>
                       <th className="py-4 px-5">السعر الفردي</th>
                       <th className="py-4 px-5">تاريخ الصلاحية</th>
+                      <th className="py-4 px-5">جودة الحفظ</th>
                       <th className="py-4 px-5">حالة الصلاحية</th>
                       <th className="py-4 px-5 text-center">الإجراءات</th>
                     </tr>
@@ -1117,7 +1726,7 @@ export default function App() {
                   <tbody className="divide-y divide-slate-100 text-xs md:text-sm">
                     {filteredItems.length === 0 ? (
                       <tr>
-                        <td colSpan="8" className="text-center py-10 text-slate-400 font-medium">
+                        <td colSpan="10" className="text-center py-10 text-slate-400 font-medium">
                           لا توجد بيانات مسجلة في هذا التبويب حالياً.
                         </td>
                       </tr>
@@ -1126,9 +1735,9 @@ export default function App() {
                         const daysLeft = calculateExpiryDays(item.expiryDate);
 
                         let qtyBadgeClass = "bg-emerald-50 text-emerald-700 border-emerald-200/60";
-                        if (item.quantity === 0) {
+                        if (totalUnitsOf(item) === 0) {
                           qtyBadgeClass = "bg-red-50 text-red-700 border-red-200/60 font-black";
-                        } else if (item.quantity <= 6) {
+                        } else if (Math.floor(totalUnitsOf(item) / unitsPerBoxOf(item)) <= 6) {
                           qtyBadgeClass = "bg-amber-50 text-amber-700 border-amber-200/60 font-bold";
                         }
 
@@ -1153,13 +1762,15 @@ export default function App() {
                             <td className="py-4 px-5 text-slate-400 font-mono text-xs">{item.barcode}</td>
                             <td className="py-4 px-5">
                               <span className={`inline-block px-3.5 py-1 rounded-full text-xs border ${qtyBadgeClass}`}>
-                                {item.quantity} علبة
+                                {formatStock(item)}
                               </span>
                             </td>
+                            <td className="py-4 px-5 font-bold text-slate-700">{unitsPerBoxOf(item)} حبة</td>
                             <td className="py-4 px-5 font-mono font-bold text-slate-700">
                               {item.price ? `${item.price.toFixed(2)} ر.س` : '0.00 ر.س'}
                             </td>
                             <td className="py-4 px-5 font-mono font-bold text-slate-700">{item.expiryDate}</td>
+                            <td className="py-4 px-5 text-slate-700">{item.storageQuality || 'حرارة الغرفة'}</td>
                             <td className="py-4 px-5">
                               <span className={`inline-block px-3 py-1 rounded-xl text-xs ${expiryBadgeClass}`}>
                                 {expiryText}
@@ -1169,8 +1780,26 @@ export default function App() {
                               {item.status === 'disposed' ? (
                                 <span className="text-xs text-slate-400 font-medium">مؤرشف في سجل التالف</span>
                               ) : (
-                                <div className="flex justify-center items-center gap-1.5">
-                                  {daysLeft <= 0 && item.quantity > 0 ? (
+                                <div className="flex justify-center items-center gap-1.5 flex-wrap">
+                                  {canManageItems(currentUser) && (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={() => openEditItem(item)}
+                                        className="px-3 py-1.5 bg-slate-100 hover:bg-sky-50 text-slate-700 hover:text-sky-700 border border-slate-200/80 rounded-xl text-xs font-bold"
+                                      >
+                                        تعديل
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleDeleteItem(item.id)}
+                                        className="px-3 py-1.5 bg-slate-100 hover:bg-red-50 text-slate-700 hover:text-red-600 border border-slate-200/80 rounded-xl text-xs font-bold"
+                                      >
+                                        حذف
+                                      </button>
+                                    </>
+                                  )}
+                                  {currentUser.role !== 'data_entry' && (daysLeft <= 0 && totalUnitsOf(item) > 0 ? (
                                     currentUser.role === 'supervisor' ? (
                                       <button
                                         onClick={() => handleDispose(item.id)}
@@ -1182,37 +1811,20 @@ export default function App() {
                                       <span className="text-xs text-red-500 font-bold">يتطلب مشرف للإتلاف</span>
                                     )
                                   ) : (
-                                    <>
+                                    currentUser.role === 'supervisor' && (
                                       <button
+                                        type="button"
                                         onClick={() => {
-                                          if (item.quantity > 0 && daysLeft > 0) {
-                                            const updated = items.map(i => i.id === item.id ? { ...i, quantity: i.quantity - 1 } : i);
-                                            setItems(updated);
-                                            addLog('صرف دواء', `خصم 1 عبوة من ${item.name}`, 'dispense');
-                                          } else {
-                                            alert("لا يمكن صرف دواء منتهي الصلاحية!");
-                                          }
+                                          const updated = items.map(i => i.id === item.id ? withStock(i, totalUnitsOf(i) + unitsPerBoxOf(i)) : i);
+                                          setItems(updated);
+                                          addLog('إضافة مخزون', `إضافة 1 علبة (${unitsPerBoxOf(item)} حبة) لـ ${item.name}`, 'checkin');
                                         }}
-                                        className="px-3.5 py-1.5 bg-slate-100 hover:bg-red-50 text-slate-700 hover:text-red-600 border border-slate-200/80 rounded-xl text-xs font-bold transition"
+                                        className="px-3 py-1.5 bg-slate-100 hover:bg-emerald-50 text-slate-700 hover:text-emerald-600 border border-slate-200/80 rounded-xl text-xs font-bold transition"
                                       >
-                                        خصم -
+                                        إضافة +
                                       </button>
-
-                                      {/* زر زيادة المخزون محظور تماماً من حساب الممرضة ومتاح للمشرف فقط */}
-                                      {currentUser.role === 'supervisor' && (
-                                        <button
-                                          onClick={() => {
-                                            const updated = items.map(i => i.id === item.id ? { ...i, quantity: i.quantity + 1 } : i);
-                                            setItems(updated);
-                                            addLog('إضافة مخزون', `إضافة 1 عبوة لـ ${item.name}`, 'checkin');
-                                          }}
-                                          className="px-3 py-1.5 bg-slate-100 hover:bg-emerald-50 text-slate-700 hover:text-emerald-600 border border-slate-200/80 rounded-xl text-xs font-bold transition"
-                                        >
-                                          إضافة +
-                                        </button>
-                                      )}
-                                    </>
-                                  )}
+                                    )
+                                  ))}
                                 </div>
                               )}
                             </td>
