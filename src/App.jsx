@@ -55,15 +55,26 @@ const actorLabel = (user) => {
   return 'مشرف';
 };
 
-const dispenserLabel = (user) => {
+const dispenserLabel = (user, nurseProfiles = []) => {
   if (!user) return '—';
-  if (user.role === 'nurse' && user.name && user.name !== 'ممرضة') return `${user.name} — ممرضة`;
+  if (user.role === 'nurse') {
+    const savedName = nurseProfiles.find((row) => row.username === user.id)?.full_name?.trim();
+    if (savedName) return savedName;
+    if (user.name && user.name !== 'ممرضة') return user.name.trim();
+  }
   return actorLabel(user) || '—';
 };
 
 const canManageItems = (user) => user?.role === 'supervisor' || user?.role === 'data_entry';
 
 const NURSE_USERNAMES = ['nurse_1', 'nurse_2', 'nurse_3', 'nurse_4'];
+const NURSE_PASSWORDS = {
+  nurse: 'Nn@1234',
+  nurse_1: 'N1@6294',
+  nurse_2: 'N2@8537',
+  nurse_3: 'N3@4718',
+  nurse_4: 'N4@2065',
+};
 const KNOWN_NURSE_IDS = {
   'ae5fe82f-0b40-4292-923c-4154f12a4ac0': 'nurse_1',
   'd6279f65-94ac-4d4b-a56b-8374a0ebe504': 'nurse_2',
@@ -265,7 +276,7 @@ const parseDispenseLog = (log) => {
     boxes: byPill ? 0 : count,
     fileNo: fileMatch?.[1] || '—',
     at: logDate(log),
-    who: (whoMatch?.[1] || '—').trim(),
+    who: (whoMatch?.[1] || '—').replace(/\s*—\s*ممرضة\s*$/, '').trim() || '—',
   };
 };
 
@@ -376,6 +387,14 @@ export default function App() {
       localStorage.removeItem('emergency_inventory_user');
     }
   }, [currentUser]);
+
+  useEffect(() => {
+    if (currentUser?.role !== 'nurse' || profiles.length === 0) return;
+    const savedName = profiles.find((row) => row.username === currentUser.id)?.full_name?.trim();
+    if (savedName && savedName !== currentUser.name) {
+      setCurrentUser((user) => (user ? { ...user, name: savedName } : user));
+    }
+  }, [profiles, currentUser]);
 
   useEffect(() => {
     let cancelled = false;
@@ -535,7 +554,7 @@ export default function App() {
       setActiveTab('all');
       addLog('تسجيل دخول', 'تسجيل دخول', 'system', user);
       playSound('success');
-    } else if ((username === 'nurse' || NURSE_USERNAMES.includes(username)) && password === 'Nn@1234') {
+    } else if (NURSE_PASSWORDS[username] && password === NURSE_PASSWORDS[username]) {
       let nurseProfiles = profiles;
       if (nurseProfiles.length === 0) {
         const { data } = await supabase
@@ -688,7 +707,7 @@ export default function App() {
       showMessage(`تم صرف ${count} ${unitLabel} (${pills} حبة) من ${targetBatch.name}. المتبقي ${updatedBatch.totalUnits} حبة.${alertNote}`, 'success');
       addLog(
         'صرف دواء',
-        `ملف المريض ${fileNo} — صرف ${count} ${unitLabel} (${pills} حبة) من ${targetBatch.name} (دفعة ${targetBatch.batchNo}). المتبقي ${updatedBatch.totalUnits} حبة. الصارف: ${dispenserLabel(currentUser)}`,
+        `ملف المريض ${fileNo} — صرف ${count} ${unitLabel} (${pills} حبة) من ${targetBatch.name} (دفعة ${targetBatch.batchNo}). المتبقي ${updatedBatch.totalUnits} حبة. الصارف: ${dispenserLabel(currentUser, profiles)}`,
         'dispense'
       );
       setBarcodeInput('');
