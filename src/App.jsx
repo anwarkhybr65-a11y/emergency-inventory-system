@@ -50,7 +50,7 @@ const initialInventory = [
 
 const actorLabel = (user) => {
   if (!user) return '';
-  return user.role === 'nurse' ? 'الممرضة' : 'المشرف';
+  return user.role === 'nurse' ? 'ممرضة' : 'مشرف';
 };
 
 const INVENTORY_COLUMNS = 'id,name,barcode,batch_no,quantity,price,expiry_date,category,status';
@@ -311,12 +311,12 @@ export default function App() {
     const password = loginForm.password.trim();
 
     if (username === 'supervisor' && password === 'Ss@102938') {
-      const user = { name: 'د. علي الشمري (مشرف)', role: 'supervisor', id: 'ADM-101' };
+      const user = { name: 'مشرف', role: 'supervisor', id: 'ADM-101' };
       setCurrentUser(user);
       addLog('تسجيل دخول', 'تسجيل دخول', 'system', user);
       playSound('success');
     } else if (username === 'nurse' && password === 'Nn@1234') {
-      const user = { name: 'الممرضة نورة العتيبي', role: 'nurse', id: 'NRS-408' };
+      const user = { name: 'ممرضة', role: 'nurse', id: 'NRS-408' };
       setCurrentUser(user);
       addLog('تسجيل دخول', 'تسجيل دخول', 'system', user);
       playSound('success');
@@ -568,24 +568,80 @@ export default function App() {
     <div className="min-h-screen bg-gradient-to-tr from-slate-100 via-teal-50/30 to-emerald-50/40 text-slate-800 p-4 md:p-8 font-sans" dir="rtl">
       
       <style>{`
+        .print-only, .print-sign { display: none; }
         @media print {
-          body * {
-            visibility: hidden;
+          @page { size: A4; margin: 12mm; }
+          html, body, #root {
+            background: #fff !important;
+            height: auto !important;
+            min-height: 0 !important;
+            overflow: visible !important;
+            color: #000 !important;
           }
-          #printable-report, #printable-report *, #printable-logs, #printable-logs * {
-            visibility: visible;
+          .no-print { display: none !important; }
+          .min-h-screen,
+          .max-w-7xl,
+          .overflow-hidden,
+          .backdrop-blur-xl {
+            overflow: visible !important;
+            height: auto !important;
+            max-height: none !important;
+            max-width: none !important;
+            background: #fff !important;
+            box-shadow: none !important;
+            border: none !important;
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+            position: static !important;
+            transform: none !important;
           }
-          #printable-report, #printable-logs {
-            position: absolute;
-            left: 0;
-            top: 0;
-            width: 100%;
-            padding: 20px;
-            background: white !important;
-            color: black !important;
+          #printable-report,
+          #printable-logs {
+            display: block !important;
+            position: static !important;
+            visibility: visible !important;
+            width: 100% !important;
+            overflow: visible !important;
+            background: #fff !important;
+            color: #000 !important;
+            padding: 0 !important;
           }
-          .no-print {
-            display: none !important;
+          #printable-report *,
+          #printable-logs * {
+            visibility: visible !important;
+            -webkit-print-color-adjust: exact;
+            print-color-adjust: exact;
+          }
+          #printable-report table,
+          #printable-logs table {
+            width: 100% !important;
+            border-collapse: collapse !important;
+            page-break-inside: auto;
+          }
+          #printable-report th,
+          #printable-report td,
+          #printable-logs th,
+          #printable-logs td {
+            border: 1px solid #333 !important;
+            color: #000 !important;
+            background: #fff !important;
+          }
+          #printable-report tr,
+          #printable-logs tr,
+          #printable-report h2,
+          #printable-report h3,
+          #printable-logs h2 {
+            break-inside: avoid;
+            page-break-inside: avoid;
+          }
+          #printable-report thead,
+          #printable-logs thead { display: table-header-group; }
+          .print-only { display: block !important; }
+          .print-sign {
+            display: grid !important;
+            grid-template-columns: 1fr 1fr;
+            margin-top: 28px;
+            text-align: center;
           }
         }
       `}</style>
@@ -601,7 +657,7 @@ export default function App() {
             <div>
               <h1 className="text-2xl font-black text-slate-900 tracking-tight">نظام متابعة أدوية الطوارئ الذكي</h1>
               <p className="text-xs text-emerald-600 font-semibold mt-0.5">
-                المستخدم الحالي: <span className="font-bold text-slate-800">{currentUser.name}</span> ({currentUser.role === 'nurse' ? 'كادر تمريض (واجهة صرف فقط)' : 'مشرف / صيدلي'})
+                المستخدم الحالي: <span className="font-bold text-slate-800">{actorLabel(currentUser)}</span>
               </p>
             </div>
           </div>
@@ -880,7 +936,7 @@ export default function App() {
               </div>
 
               <div id="printable-logs" className="space-y-4">
-                <div className="hidden print:block text-center border-b pb-4 mb-4">
+                <div className="print-only text-center border-b pb-4 mb-4">
                   <h2 className="text-2xl font-black text-slate-900">تقرير سجل الحركات والتدقيق الطبي الرسمية</h2>
                   <p className="text-xs text-slate-500 mt-1">تاريخ الاستخراج: {new Date().toLocaleString('ar-SA')} | {actorLabel(currentUser)}</p>
                 </div>
@@ -914,7 +970,7 @@ export default function App() {
                   </table>
                 </div>
 
-                <div className="hidden print:grid grid-cols-2 text-center text-xs text-slate-700 font-semibold border-t mt-12 pt-4">
+                <div className="print-sign text-center text-xs text-slate-700 font-semibold border-t mt-12 pt-4">
                   <div>توقيع المشرف الرقابي: .......................</div>
                   <div>اعتماد مدير القسم: .......................</div>
                 </div>
