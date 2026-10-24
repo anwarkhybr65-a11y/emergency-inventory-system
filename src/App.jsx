@@ -57,12 +57,17 @@ const actorLabel = (user) => {
 
 const dispenserLabel = (user, nurseProfiles = []) => {
   if (!user) return '—';
-  if (user.role === 'nurse') {
-    const savedName = nurseProfiles.find((row) => row.username === user.id)?.full_name?.trim();
-    if (savedName) return savedName;
-    if (user.name && user.name !== 'ممرضة') return user.name.trim();
-  }
-  return actorLabel(user) || '—';
+  if (user.role !== 'nurse') return actorLabel(user) || '—';
+  const savedName = nurseProfiles.find((row) => row.username === user.id)?.full_name?.trim();
+  const name = savedName || (user.name && user.name !== 'ممرضة' ? user.name.trim() : '');
+  return name ? `الممرضة ${name}` : 'ممرضة';
+};
+
+const formatDispenser = (value) => {
+  const text = String(value || '').replace(/\s*—\s*ممرضة\s*$/, '').trim();
+  if (!text || text === '—') return '—';
+  if (text === 'مشرف' || text === 'مدخل البيانات' || text === 'ممرضة' || text.startsWith('الممرضة ')) return text;
+  return `الممرضة ${text}`;
 };
 
 const canManageItems = (user) => user?.role === 'supervisor' || user?.role === 'data_entry';
@@ -276,7 +281,7 @@ const parseDispenseLog = (log) => {
     boxes: byPill ? 0 : count,
     fileNo: fileMatch?.[1] || '—',
     at: logDate(log),
-    who: (whoMatch?.[1] || '—').replace(/\s*—\s*ممرضة\s*$/, '').trim() || '—',
+    who: formatDispenser(whoMatch?.[1]),
   };
 };
 
@@ -594,7 +599,7 @@ export default function App() {
 
   const addLog = (action, details, type, actor = currentUser) => {
     const label = actorLabel(actor);
-    const userString = label ? ` [${label}]` : '';
+    const userString = details.includes('الصارف:') || !label ? '' : ` [${label}]`;
     const newLogEntry = {
       id: Date.now(),
       timestamp: new Date().toLocaleString('ar-SA'),
