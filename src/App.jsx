@@ -514,9 +514,11 @@ export default function App() {
       <div className="min-h-screen bg-gradient-to-br from-slate-900 via-teal-950 to-emerald-950 flex items-center justify-center p-4 font-sans" dir="rtl">
         <div className="max-w-md w-full bg-white/95 backdrop-blur-2xl rounded-3xl p-8 shadow-2xl border border-white/20 space-y-6">
           <div className="text-center space-y-2">
-            <div className="w-16 h-16 bg-gradient-to-tr from-emerald-500 to-teal-400 rounded-2xl flex items-center justify-center text-3xl mx-auto shadow-lg shadow-emerald-500/30 text-white">
-              🩺
-            </div>
+            <img
+              src="/logo.png"
+              alt="مجمع أنوار خيبر الطبي"
+              className="h-20 w-auto mx-auto object-contain"
+            />
             <h1 className="text-2xl font-black text-slate-900">تسجيل الدخول للنظام</h1>
             <p className="text-xs text-slate-500 font-semibold">نظام تتبع ورصد أدوية الطوارئ المعتمد</p>
           </div>
@@ -651,9 +653,11 @@ export default function App() {
         {/* Header */}
         <header className="bg-white/80 backdrop-blur-xl p-6 rounded-3xl border border-white/60 shadow-xl shadow-slate-200/50 flex flex-col md:flex-row justify-between items-center gap-4 no-print">
           <div className="flex items-center gap-4">
-            <div className="w-14 h-14 bg-gradient-to-tr from-emerald-500 to-teal-400 rounded-2xl flex items-center justify-center text-2xl shadow-lg shadow-emerald-500/30 text-white">
-              🩺
-            </div>
+            <img
+              src="/logo.png"
+              alt="مجمع أنوار خيبر الطبي"
+              className="h-14 w-auto object-contain"
+            />
             <div>
               <h1 className="text-2xl font-black text-slate-900 tracking-tight">نظام متابعة أدوية الطوارئ الذكي</h1>
               <p className="text-xs text-emerald-600 font-semibold mt-0.5">
