@@ -147,6 +147,11 @@ const isoDate = (value) => {
   return match ? match[1] : String(value || '');
 };
 
+const fefoRefusalMessage = (expiryDate) =>
+  `عفواً، لا يمكن صرف هذه العلبة! توجد علبة أقدم متوفرة في المخزون (تاريخ انتهاء الصلاحية: ${isoDate(expiryDate)}). يرجى إحضار ومسح العلبة الأقدم لإتمام الصرف.`;
+
+const batchIdentity = (item) => `${String(item?.batchNo || '').trim()}|${isoDate(item?.expiryDate)}`;
+
 const olderAvailableBatch = (stock, candidate) => {
   if (!candidate) return null;
   const candidateDays = calculateExpiryDays(candidate.expiryDate);
@@ -700,8 +705,7 @@ export default function App() {
       }
 
       const availableBatches = matchingBatches
-        .filter(b => totalUnitsOf(b) > 0 && calculateExpiryDays(b.expiryDate) > 0)
-        .sort((a, b) => calculateExpiryDays(a.expiryDate) - calculateExpiryDays(b.expiryDate));
+        .filter(b => totalUnitsOf(b) > 0 && calculateExpiryDays(b.expiryDate) > 0);
 
       if (availableBatches.length === 0) {
         playSound('error');
@@ -715,13 +719,19 @@ export default function App() {
         return;
       }
 
-      const targetBatch = availableBatches[0];
-      const olderBatch = olderAvailableBatch(activeItems, targetBatch);
+      const newestMatch = [...availableBatches].sort(
+        (a, b) => calculateExpiryDays(b.expiryDate) - calculateExpiryDays(a.expiryDate)
+      )[0];
+      const olderBatch = olderAvailableBatch(activeItems, newestMatch);
       if (olderBatch) {
         playSound('error');
-        showMessage(`تنبيه: توجد علبة أقدم متوفرة بهذا الدواء (تاريخ الانتهاء: ${isoDate(olderBatch.expiryDate)}). يرجى صرف العلبة الأقدم أولاً لضمان سلامة المخزون.`, 'fefo');
+        showMessage(fefoRefusalMessage(olderBatch.expiryDate), 'fefo');
         return;
       }
+
+      const targetBatch = availableBatches.find(
+        (batch) => batchIdentity(batch) === batchIdentity(newestMatch)
+      ) || newestMatch;
       const perBox = unitsPerBoxOf(targetBatch);
       const pills = dispenseUnit === 'box' ? count * perBox : count;
       const available = totalUnitsOf(targetBatch);
@@ -734,10 +744,8 @@ export default function App() {
       const updatedBatch = withStock(targetBatch, available - pills, perBox);
       setItems(items.map(item => item.id === targetBatch.id ? updatedBatch : item));
       playSound('success');
-      const daysLeft = calculateExpiryDays(targetBatch.expiryDate);
       const unitLabel = dispenseUnit === 'box' ? 'علبة' : 'حبة';
-      const alertNote = daysLeft <= 30 ? ' ⚠️ (صرف تلقائي من الدفعة الأقرب انتهاءً)' : '';
-      showMessage(`تم صرف ${count} ${unitLabel} (${pills} حبة) من ${targetBatch.name}. المتبقي ${updatedBatch.totalUnits} حبة.${alertNote}`, 'success');
+      showMessage(`تم صرف ${count} ${unitLabel} (${pills} حبة) من ${targetBatch.name} (دفعة ${targetBatch.batchNo}). المتبقي ${updatedBatch.totalUnits} حبة.`, 'success');
       addLog(
         'صرف دواء',
         `ملف المريض ${fileNo} — صرف ${count} ${unitLabel} (${pills} حبة) من ${targetBatch.name} (دفعة ${targetBatch.batchNo}). المتبقي ${updatedBatch.totalUnits} حبة. الصارف: ${dispenserLabel(currentUser, profiles)}`,
