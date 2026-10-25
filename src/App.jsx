@@ -39,12 +39,12 @@ const calculateExpiryDays = (expiryDateStr) => {
 };
 
 const initialInventory = [
-  { id: 1, name: 'أدرينالين (Epinephrine Injection)', barcode: '62810001111', batchNo: 'BAT-2026-A', quantity: 5, price: 45.00, expiryDate: '2026-11-04', category: 'أدوية حرجة', status: 'active' },
-  { id: 2, name: 'أدرينالين (Epinephrine Injection)', barcode: '62810001111', batchNo: 'BAT-2026-B', quantity: 10, price: 45.00, expiryDate: '2027-04-20', category: 'أدوية حرجة', status: 'active' },
-  { id: 3, name: 'أتروبين (Atropine Ampoule)', barcode: '62810002222', batchNo: 'BAT-2026-C', quantity: 4, price: 30.00, expiryDate: '2026-11-07', category: 'أدوية حرجة', status: 'active' },
+  { id: 1, name: 'أدرينالين (Epinephrine Injection)', barcode: '62810001111', batchNo: 'BAT-2026-A', quantity: 5, price: 45.00, expiryDate: '2026-11-04', category: 'أدوية', status: 'active' },
+  { id: 2, name: 'أدرينالين (Epinephrine Injection)', barcode: '62810001111', batchNo: 'BAT-2026-B', quantity: 10, price: 45.00, expiryDate: '2027-04-20', category: 'أدوية', status: 'active' },
+  { id: 3, name: 'أتروبين (Atropine Ampoule)', barcode: '62810002222', batchNo: 'BAT-2026-C', quantity: 4, price: 30.00, expiryDate: '2026-11-07', category: 'أدوية', status: 'active' },
   { id: 4, name: 'محلول ملحي (Normal Saline 500ml)', barcode: '62810003333', batchNo: 'BAT-2026-D', quantity: 2, price: 15.50, expiryDate: '2027-05-10', category: 'محاليل', status: 'active' },
   { id: 5, name: 'شاش معقم (Sterile Gauze 10x10)', barcode: '62810004444', batchNo: 'BAT-2026-E', quantity: 0, price: 8.00, expiryDate: '2027-10-23', category: 'ضمادات', status: 'active' },
-  { id: 6, name: 'إنسولين سريع (Regular Insulin)', barcode: '62810005555', batchNo: 'BAT-2026-F', quantity: 3, price: 85.00, expiryDate: '2026-10-21', category: 'أدوية حرجة', status: 'active' },
+  { id: 6, name: 'إنسولين سريع (Regular Insulin)', barcode: '62810005555', batchNo: 'BAT-2026-F', quantity: 3, price: 85.00, expiryDate: '2026-10-21', category: 'أدوية', status: 'active' },
   { id: 7, name: 'حقن بلاستيكية 5مل (Syringe 5ml)', barcode: '62810006666', batchNo: 'BAT-2026-G', quantity: 45, price: 2.50, expiryDate: '2028-03-01', category: 'مستلزمات', status: 'active' },
 ];
 
@@ -382,7 +382,7 @@ export default function App() {
     unitsPerBox: 1,
     price: 10.00,
     expiryDate: '',
-    category: 'أدوية حرجة',
+    category: 'أدوية',
     storageQuality: 'حرارة الغرفة',
   });
   const [editingId, setEditingId] = useState(null);
@@ -794,7 +794,7 @@ export default function App() {
       unitsPerBox: 1,
       price: 10.00,
       expiryDate: '',
-      category: 'أدوية حرجة',
+      category: 'أدوية',
       storageQuality: 'حرارة الغرفة',
     });
   };
@@ -809,7 +809,7 @@ export default function App() {
       unitsPerBox: unitsPerBoxOf(item),
       price: item.price,
       expiryDate: item.expiryDate,
-      category: item.category,
+      category: item.category === 'أدوية حرجة' ? 'أدوية' : item.category,
       storageQuality: item.storageQuality || 'حرارة الغرفة',
     });
     setShowAddForm(true);
@@ -1191,7 +1191,7 @@ export default function App() {
                     onChange={(e) => setNewItem({ ...newItem, category: e.target.value })}
                     className="w-full px-4 py-3 bg-slate-50/80 border border-slate-200 rounded-2xl text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 transition"
                   >
-                    <option value="أدوية حرجة">أدوية حرجة</option>
+                    <option value="أدوية">أدوية</option>
                     <option value="محاليل">محاليل وريدية</option>
                     <option value="ضمادات">ضمادات ومطهرات</option>
                     <option value="مستلزمات">مستلزمات عامة</option>
@@ -1680,7 +1680,7 @@ export default function App() {
                         <tr><th className="p-2 border bg-slate-50">إجمالي الحبات</th><td className="p-2 border">{entrySlip.totalUnits ?? ((entrySlip.quantity || 0) * (entrySlip.unitsPerBox || 1))}</td></tr>
                         <tr><th className="p-2 border bg-slate-50">السعر</th><td className="p-2 border">{Number(entrySlip.price || 0).toFixed(2)} ر.س</td></tr>
                         <tr><th className="p-2 border bg-slate-50">تاريخ الانتهاء</th><td className="p-2 border">{entrySlip.expiryDate}</td></tr>
-                        <tr><th className="p-2 border bg-slate-50">الفئة</th><td className="p-2 border">{entrySlip.category}</td></tr>
+                        <tr><th className="p-2 border bg-slate-50">الفئة</th><td className="p-2 border">{entrySlip.category === 'أدوية حرجة' ? 'أدوية' : entrySlip.category}</td></tr>
                         <tr><th className="p-2 border bg-slate-50">جودة الحفظ</th><td className="p-2 border font-bold">{entrySlip.storageQuality}</td></tr>
                       </tbody>
                     </table>
