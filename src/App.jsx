@@ -415,6 +415,135 @@ const formatDateTime = (date) => (
   date ? date.toLocaleString('ar-SA', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'
 );
 
+const ARCHIVE_KEY = 'emergency_report_archive_v1';
+
+const emptyArchive = () => ({ entries: [], monthly: [], yearly: [] });
+
+const readArchive = () => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(ARCHIVE_KEY) || '{}');
+    return {
+      entries: Array.isArray(saved.entries) ? saved.entries : [],
+      monthly: Array.isArray(saved.monthly) ? saved.monthly : [],
+      yearly: Array.isArray(saved.yearly) ? saved.yearly : [],
+    };
+  } catch {
+    return emptyArchive();
+  }
+};
+
+const writeArchive = (archive) => {
+  localStorage.setItem(ARCHIVE_KEY, JSON.stringify(archive));
+};
+
+const monthKey = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+
+const withinDateInput = (value, from, to) => {
+  if (!value) return !from && !to;
+  const day = new Date(value);
+  if (Number.isNaN(day.getTime())) return false;
+  if (from) {
+    const start = new Date(from);
+    start.setHours(0, 0, 0, 0);
+    if (day < start) return false;
+  }
+  if (to) {
+    const end = new Date(to);
+    end.setHours(23, 59, 59, 999);
+    if (day > end) return false;
+  }
+  return true;
+};
+
+const dispenseRowsBetween = (logs, start, end) => logs
+  .filter((log) => log.type === 'dispense' || log.action === 'صرف دواء')
+  .map(parseDispenseLog)
+  .filter((row) => row.at && row.at >= start && row.at < end)
+  .sort((a, b) => b.at - a.at)
+  .map((row) => ({ ...row, at: row.at.toISOString() }));
+
+const buildPeriodicArchive = (logs, now = new Date()) => {
+  const archive = readArchive();
+  const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const dates = logs
+    .filter((log) => log.type === 'dispense' || log.action === 'صرف دواء')
+    .map(logDate)
+    .filter(Boolean);
+  if (dates.length === 0) return archive;
+  const earliest = new Date(Math.min(...dates.map((date) => date.getTime())));
+  const cursor = new Date(earliest.getFullYear(), earliest.getMonth(), 1);
+  let changed = false;
+  while (cursor < currentMonthStart) {
+    const start = new Date(cursor);
+    const end = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
+    const key = monthKey(start);
+    if (!archive.monthly.some((item) => item.key === key)) {
+      archive.monthly.push({
+        key,
+        kind: 'monthly',
+        title: `التقرير الشهري ${start.toLocaleDateString('ar-SA', { month: 'long', year: 'numeric' })}`,
+        start: start.toISOString(),
+        end: new Date(end.getTime() - 1).toISOString(),
+        rows: dispenseRowsBetween(logs, start, end),
+      });
+      changed = true;
+    }
+    const yearKey = `${start.getFullYear()}-until-${key}`;
+    if (!archive.yearly.some((item) => item.key === yearKey)) {
+      const yearStart = new Date(start.getFullYear(), 0, 1);
+      archive.yearly.push({
+        key: yearKey,
+        kind: 'yearly',
+        title: `التقرير السنوي حتى ${start.toLocaleDateString('ar-SA', { month: 'long', year: 'numeric' })}`,
+        start: yearStart.toISOString(),
+        end: new Date(end.getTime() - 1).toISOString(),
+        rows: dispenseRowsBetween(logs, yearStart, end),
+      });
+      changed = true;
+    }
+    cursor.setMonth(cursor.getMonth() + 1);
+  }
+  if (changed) {
+    archive.monthly.sort((a, b) => b.key.localeCompare(a.key));
+    archive.yearly.sort((a, b) => b.key.localeCompare(a.key));
+    writeArchive(archive);
+  }
+  return archive;
+};
+
+const saveEntryArchive = (slip) => {
+  const archive = readArchive();
+  const record = {
+    id: String(Date.now()),
+    kind: 'entry',
+    name: slip.name,
+    batchNo: slip.batchNo,
+    quantity: slip.quantity,
+    unitsPerBox: slip.unitsPerBox,
+    totalUnits: slip.totalUnits,
+    action: slip.action,
+    at: slip.at || new Date().toISOString(),
+    actor: slip.actor || '',
+  };
+  archive.entries = [record, ...archive.entries];
+  writeArchive(archive);
+  return archive;
+};
+
+const parseDisposeLog = (log) => {
+  const details = String(log.details || '');
+  const batchMatch = details.match(/دفعة\s+(\S+)/);
+  const nameMatch = details.match(/لـ\s+(.+?)(?:\.|\[|$)/);
+  const dateMatch = details.match(/تاريخ الإتلاف:\s*(\d{4}-\d{2}-\d{2})/);
+  const at = dateMatch ? new Date(`${dateMatch[1]}T12:00:00`) : logDate(log);
+  return {
+    id: log.id,
+    name: (nameMatch?.[1] || '—').replace(/\s*\[.*$/, '').trim(),
+    batch: (batchMatch?.[1] || '').replace(/[.\]]/g, ''),
+    at,
+  };
+};
+
 const sanitizeLogDetails = (details) => {
   if (!details) return details;
   return details
@@ -465,6 +594,18 @@ export default function App() {
 
   const [logFilter, setLogFilter] = useState('all');
   const [expensePeriod, setExpensePeriod] = useState('weekly');
+  const [expenseQuery, setExpenseQuery] = useState('');
+  const [expenseField, setExpenseField] = useState('all');
+  const [expenseFrom, setExpenseFrom] = useState('');
+  const [expenseTo, setExpenseTo] = useState('');
+  const [disposeFrom, setDisposeFrom] = useState('');
+  const [disposeTo, setDisposeTo] = useState('');
+  const [archive, setArchive] = useState(readArchive);
+  const [archiveKind, setArchiveKind] = useState('entry');
+  const [archiveQuery, setArchiveQuery] = useState('');
+  const [archiveFrom, setArchiveFrom] = useState('');
+  const [archiveTo, setArchiveTo] = useState('');
+  const [openArchiveKey, setOpenArchiveKey] = useState('');
   const [barcodeInput, setBarcodeInput] = useState('');
   const [patientFileNumber, setPatientFileNumber] = useState('');
   const [dispenseQty, setDispenseQty] = useState('');
@@ -511,6 +652,7 @@ export default function App() {
 
   useEffect(() => {
     localStorage.setItem('emergency_inventory_logs', JSON.stringify(logs));
+    setArchive(buildPeriodicArchive(logs));
   }, [logs]);
 
   useEffect(() => {
@@ -896,7 +1038,9 @@ export default function App() {
       setItems(updated);
       playSound('success');
       showMessage(`🗑️ تم نقل الدفعة (${target.batchNo}) إلى سجل التالف والمستبعد.`, 'success');
-      addLog('إتلاف دواء', `إتلاف واستبعاد دفعة ${target.batchNo} لـ ${target.name}`, 'dispose');
+      const disposedOn = new Date();
+      const disposalDate = `${disposedOn.getFullYear()}-${String(disposedOn.getMonth() + 1).padStart(2, '0')}-${String(disposedOn.getDate()).padStart(2, '0')}`;
+      addLog('إتلاف دواء', `إتلاف واستبعاد دفعة ${target.batchNo} لـ ${target.name}. تاريخ الإتلاف: ${disposalDate}`, 'dispose');
     }
   };
 
@@ -993,7 +1137,14 @@ export default function App() {
       addLog('تسجيل صنف', `تسجيل شحنة جديدة: ${savedItem.name} (كمية ${savedItem.quantity} علبة × ${savedItem.unitsPerBox} حبة) — تنبيه النفاذ ${savedItem.lowStockAlert} علبة — ${savedItem.storageQuality}`, 'add');
     }
 
-    setEntrySlip({ ...savedItem, action: editingId ? 'تعديل' : 'إدخال' });
+    const slip = {
+      ...savedItem,
+      action: editingId ? 'تعديل' : 'إدخال',
+      at: new Date().toISOString(),
+      actor: actorLabel(currentUser),
+    };
+    setEntrySlip(slip);
+    setArchive(saveEntryArchive(slip));
     setShowAddForm(false);
     resetItemForm();
     if (currentUser?.role === 'data_entry') setActiveTab('entryReport');
@@ -1117,15 +1268,54 @@ export default function App() {
     return log.type === logFilter;
   });
 
-  const expenseWindow = periodRange(expensePeriod);
-  const expenseRows = logs
+  const expenseWindow = expensePeriod === 'dispose' ? { start: new Date(0), end: new Date(8640000000000000) } : periodRange(expensePeriod);
+  const expenseSource = logs
     .filter((log) => log.type === 'dispense' || log.action === 'صرف دواء')
     .map(parseDispenseLog)
     .filter((row) => row.at && row.at >= expenseWindow.start && row.at < expenseWindow.end)
+    .filter((row) => withinDateInput(row.at, expenseFrom, expenseTo))
+    .filter((row) => {
+      const query = expenseQuery.trim().toLowerCase();
+      if (!query) return true;
+      const dateText = formatDateTime(row.at).toLowerCase();
+      const who = String(row.who || '').toLowerCase();
+      const fileNo = String(row.fileNo || '').toLowerCase();
+      const drug = `${row.name} ${row.batch}`.toLowerCase();
+      if (expenseField === 'date') return dateText.includes(query);
+      if (expenseField === 'who') return who.includes(query);
+      if (expenseField === 'file') return fileNo.includes(query);
+      if (expenseField === 'drug') return drug.includes(query);
+      return dateText.includes(query) || who.includes(query) || fileNo.includes(query) || drug.includes(query);
+    })
     .sort((a, b) => b.at - a.at);
+  const expenseRows = expenseSource;
   const expensePillTotal = expenseRows.reduce((sum, row) => sum + row.pills, 0);
   const expenseBoxTotal = expenseRows.reduce((sum, row) => sum + row.boxes, 0);
-  const expensePeriodTitle = expensePeriod === 'weekly' ? 'الأسبوعي' : expensePeriod === 'yearly' ? 'السنوي' : 'الشهري';
+  const expensePeriodTitle = expensePeriod === 'weekly'
+    ? 'الأسبوعي'
+    : expensePeriod === 'yearly'
+      ? 'السنوي'
+      : expensePeriod === 'dispose'
+        ? 'الإتلاف'
+        : 'الشهري';
+  const disposalRows = logs
+    .filter((log) => log.type === 'dispose' || log.action === 'إتلاف دواء')
+    .map(parseDisposeLog)
+    .filter((row) => withinDateInput(row.at, disposeFrom, disposeTo))
+    .sort((a, b) => (b.at?.getTime() || 0) - (a.at?.getTime() || 0));
+  const archiveEntries = archive.entries.filter((row) => {
+    if (archiveQuery.trim() && !String(row.name || '').includes(archiveQuery.trim())) return false;
+    return withinDateInput(row.at, archiveFrom, archiveTo);
+  });
+  const archiveReports = (archiveKind === 'yearly' ? archive.yearly : archive.monthly).filter((report) => {
+    if (archiveFrom || archiveTo) {
+      const overlapsStart = !archiveTo || new Date(report.start) <= new Date(`${archiveTo}T23:59:59`);
+      const overlapsEnd = !archiveFrom || new Date(report.end) >= new Date(`${archiveFrom}T00:00:00`);
+      if (!overlapsStart || !overlapsEnd) return false;
+    }
+    if (!archiveQuery.trim()) return true;
+    return (report.rows || []).some((row) => String(row.name || '').includes(archiveQuery.trim()));
+  });
 
   if (!currentUser) {
     return (
@@ -1217,7 +1407,8 @@ export default function App() {
           }
           #printable-report,
           #printable-logs,
-          #printable-entry {
+          #printable-entry,
+          #printable-archive {
             display: block !important;
             position: static !important;
             visibility: visible !important;
@@ -1229,14 +1420,16 @@ export default function App() {
           }
           #printable-report *,
           #printable-logs *,
-          #printable-entry * {
+          #printable-entry *,
+          #printable-archive * {
             visibility: visible !important;
             -webkit-print-color-adjust: exact;
             print-color-adjust: exact;
           }
           #printable-report table,
           #printable-logs table,
-          #printable-entry table {
+          #printable-entry table,
+          #printable-archive table {
             width: 100% !important;
             border-collapse: collapse !important;
             page-break-inside: auto;
@@ -1246,7 +1439,9 @@ export default function App() {
           #printable-logs th,
           #printable-logs td,
           #printable-entry th,
-          #printable-entry td {
+          #printable-entry td,
+          #printable-archive th,
+          #printable-archive td {
             border: 1px solid #333 !important;
             color: #000 !important;
             background: #fff !important;
@@ -1254,16 +1449,19 @@ export default function App() {
           #printable-report tr,
           #printable-logs tr,
           #printable-entry tr,
+          #printable-archive tr,
           #printable-report h2,
           #printable-report h3,
           #printable-logs h2,
-          #printable-entry h2 {
+          #printable-entry h2,
+          #printable-archive h2 {
             break-inside: avoid;
             page-break-inside: avoid;
           }
           #printable-report thead,
           #printable-logs thead,
-          #printable-entry thead { display: table-header-group; }
+          #printable-entry thead,
+          #printable-archive thead { display: table-header-group; }
           .print-only { display: block !important; }
           .print-sign {
             display: grid !important;
@@ -1331,6 +1529,12 @@ export default function App() {
                   className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-2xl text-xs shadow-md transition flex items-center gap-1.5"
                 >
                   <span>📊 التقارير / PDF</span>
+                </button>
+                <button
+                  onClick={() => setActiveTab('archive')}
+                  className="px-4 py-2.5 bg-white hover:bg-slate-50 text-slate-700 font-bold rounded-2xl text-xs border border-slate-200/80 shadow-md transition flex items-center gap-1.5"
+                >
+                  <span>🗄️ الأرشيف</span>
                 </button>
                 <button
                   onClick={() => setActiveTab('settings')}
@@ -1623,6 +1827,14 @@ export default function App() {
                 >
                   📋 التقارير وحفظ PDF
                 </button>
+                <button
+                  onClick={() => setActiveTab('archive')}
+                  className={`px-5 py-2.5 rounded-2xl text-xs md:text-sm font-bold transition-all ${
+                    activeTab === 'archive' ? 'bg-slate-800 text-white shadow-lg' : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200/60'
+                  }`}
+                >
+                  🗄️ الأرشيف
+                </button>
               </>
             )}
           </div>
@@ -1719,12 +1931,13 @@ export default function App() {
 
                 <div className="space-y-2">
                   <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-                    <h3 className="font-bold text-xs text-sky-900 bg-sky-50 p-2 rounded-lg border border-sky-200">💊 تقرير المصروفات {expensePeriodTitle}</h3>
+                    <h3 className="font-bold text-xs text-sky-900 bg-sky-50 p-2 rounded-lg border border-sky-200">{expensePeriod === 'dispose' ? '🗑️ تقرير الإتلاف' : `💊 تقرير المصروفات ${expensePeriodTitle}`}</h3>
                     <div className="flex flex-wrap gap-2 no-print">
                       {[
                         ['weekly', 'تقرير أسبوعي'],
                         ['monthly', 'تقرير شهري'],
                         ['yearly', 'تقرير سنوي'],
+                        ['dispose', 'تقرير الإتلاف'],
                       ].map(([period, label]) => (
                         <button
                           key={period}
@@ -1737,6 +1950,74 @@ export default function App() {
                           {label}
                         </button>
                       ))}
+                    </div>
+                  </div>
+                  {expensePeriod === 'dispose' ? (
+                    <div className="space-y-3">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 no-print">
+                        <label className="text-xs font-bold text-slate-600">
+                          من تاريخ
+                          <input type="date" value={disposeFrom} onChange={(e) => setDisposeFrom(e.target.value)} className="mt-1 w-full px-3 py-2 border border-slate-200 rounded-xl" />
+                        </label>
+                        <label className="text-xs font-bold text-slate-600">
+                          إلى تاريخ
+                          <input type="date" value={disposeTo} onChange={(e) => setDisposeTo(e.target.value)} className="mt-1 w-full px-3 py-2 border border-slate-200 rounded-xl" />
+                        </label>
+                      </div>
+                      <p className="text-xs text-slate-500">{disposalRows.length} عملية إتلاف</p>
+                      <table className="w-full text-right border-collapse border border-slate-300 text-xs">
+                        <thead>
+                          <tr className="bg-red-100">
+                            <th className="p-2 border">اسم الدواء</th>
+                            <th className="p-2 border">رقم الدفعة</th>
+                            <th className="p-2 border">تاريخ الإتلاف</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {disposalRows.length === 0 ? (
+                            <tr><td colSpan="3" className="p-4 border text-center text-slate-500">لا توجد عمليات إتلاف في هذه الفترة.</td></tr>
+                          ) : disposalRows.map((row) => (
+                            <tr key={row.id}>
+                              <td className="p-2 border font-semibold">{row.name}</td>
+                              <td className="p-2 border font-mono">{row.batch || '—'}</td>
+                              <td className="p-2 border">{formatDateTime(row.at)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                  <>
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-3 no-print">
+                    <label className="text-xs font-bold text-slate-600 md:col-span-2">
+                      بحث
+                      <input
+                        type="search"
+                        value={expenseQuery}
+                        onChange={(e) => setExpenseQuery(e.target.value)}
+                        placeholder="التاريخ، اسم الصارف، رقم الملف، أو الدواء"
+                        className="mt-1 w-full px-3 py-2 border border-slate-200 rounded-xl font-normal"
+                      />
+                    </label>
+                    <label className="text-xs font-bold text-slate-600">
+                      مجال البحث
+                      <select value={expenseField} onChange={(e) => setExpenseField(e.target.value)} className="mt-1 w-full px-3 py-2 border border-slate-200 rounded-xl font-normal">
+                        <option value="all">كل الحقول</option>
+                        <option value="date">التاريخ</option>
+                        <option value="who">اسم الصارف / الممرضة</option>
+                        <option value="file">رقم ملف المريض</option>
+                        <option value="drug">اسم الدواء</option>
+                      </select>
+                    </label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <label className="text-xs font-bold text-slate-600">
+                        من تاريخ
+                        <input type="date" value={expenseFrom} onChange={(e) => setExpenseFrom(e.target.value)} className="mt-1 w-full px-2 py-2 border border-slate-200 rounded-xl" />
+                      </label>
+                      <label className="text-xs font-bold text-slate-600">
+                        إلى تاريخ
+                        <input type="date" value={expenseTo} onChange={(e) => setExpenseTo(e.target.value)} className="mt-1 w-full px-2 py-2 border border-slate-200 rounded-xl" />
+                      </label>
                     </div>
                   </div>
                   <p className="text-xs text-slate-500">
@@ -1774,6 +2055,8 @@ export default function App() {
                       ))}
                     </tbody>
                   </table>
+                  </>
+                  )}
                 </div>
 
                 <div className="space-y-2">
@@ -1817,6 +2100,112 @@ export default function App() {
                     </tbody>
                   </table>
                 </div>
+              </div>
+            </div>
+          ) : activeTab === 'archive' && currentUser.role === 'supervisor' ? (
+            <div className="p-6 space-y-5 bg-white">
+              <div className="flex justify-between items-center no-print border-b pb-4">
+                <div>
+                  <h2 className="text-xl font-black text-slate-900">الأرشيف</h2>
+                  <p className="text-xs text-slate-500 mt-1">تقارير الإدخال الفوري محفوظة هنا، والتقارير الشهرية والسنوية تُنقل تلقائياً مع بداية كل شهر جديد.</p>
+                </div>
+                <button type="button" onClick={() => window.print()} className="px-5 py-2.5 bg-slate-900 text-white font-bold rounded-2xl text-xs">طباعة الأرشيف</button>
+              </div>
+              <div className="flex flex-wrap gap-2 no-print">
+                {[
+                  ['entry', 'أرشيف تقارير الإدخال الفوري'],
+                  ['monthly', 'أرشيف التقارير الشهرية'],
+                  ['yearly', 'أرشيف التقارير السنوية'],
+                ].map(([kind, label]) => (
+                  <button
+                    key={kind}
+                    type="button"
+                    onClick={() => { setArchiveKind(kind); setOpenArchiveKey(''); }}
+                    className={`px-4 py-2 rounded-xl text-xs font-bold ${archiveKind === kind ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 border border-slate-200'}`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 no-print">
+                <label className="text-xs font-bold text-slate-600">
+                  اسم الدواء
+                  <input type="search" value={archiveQuery} onChange={(e) => setArchiveQuery(e.target.value)} className="mt-1 w-full px-3 py-2 border border-slate-200 rounded-xl font-normal" />
+                </label>
+                <label className="text-xs font-bold text-slate-600">
+                  من تاريخ
+                  <input type="date" value={archiveFrom} onChange={(e) => setArchiveFrom(e.target.value)} className="mt-1 w-full px-3 py-2 border border-slate-200 rounded-xl" />
+                </label>
+                <label className="text-xs font-bold text-slate-600">
+                  إلى تاريخ
+                  <input type="date" value={archiveTo} onChange={(e) => setArchiveTo(e.target.value)} className="mt-1 w-full px-3 py-2 border border-slate-200 rounded-xl" />
+                </label>
+              </div>
+              <div id="printable-archive" className="space-y-4">
+                {archiveKind === 'entry' ? (
+                  <table className="w-full text-right border-collapse border border-slate-300 text-xs">
+                    <thead>
+                      <tr className="bg-slate-100">
+                        <th className="p-2 border">التاريخ</th>
+                        <th className="p-2 border">العملية</th>
+                        <th className="p-2 border">اسم الدواء</th>
+                        <th className="p-2 border">الكمية</th>
+                        <th className="p-2 border">من سجله</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {archiveEntries.length === 0 ? (
+                        <tr><td colSpan="5" className="p-4 border text-center text-slate-500">لا توجد تقارير إدخال في هذه الفترة.</td></tr>
+                      ) : archiveEntries.map((row) => (
+                        <tr key={row.id}>
+                          <td className="p-2 border">{formatDateTime(new Date(row.at))}</td>
+                          <td className="p-2 border">{row.action}</td>
+                          <td className="p-2 border font-semibold">{row.name}<div className="text-[11px] font-mono text-slate-500">{row.batchNo}</div></td>
+                          <td className="p-2 border">{row.quantity} علبة</td>
+                          <td className="p-2 border">{row.actor || '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                ) : archiveReports.length === 0 ? (
+                  <p className="text-sm text-slate-500">لا توجد تقارير مؤرشفة مطابقة. التقارير المكتملة تُنقل هنا عند دخول شهر جديد.</p>
+                ) : archiveReports.map((report) => {
+                  const rows = (report.rows || []).filter((row) => !archiveQuery.trim() || String(row.name || '').includes(archiveQuery.trim()));
+                  const open = openArchiveKey === report.key;
+                  return (
+                    <div key={report.key} className="border border-slate-200 rounded-2xl overflow-hidden">
+                      <button type="button" onClick={() => setOpenArchiveKey(open ? '' : report.key)} className="w-full text-right px-4 py-3 bg-slate-50 font-bold text-sm">
+                        {report.title} — {rows.length} عملية
+                      </button>
+                      {open && (
+                        <table className="w-full text-right border-collapse text-xs">
+                          <thead>
+                            <tr className="bg-sky-50">
+                              <th className="p-2 border">اسم الدواء</th>
+                              <th className="p-2 border">الكمية</th>
+                              <th className="p-2 border">رقم الملف</th>
+                              <th className="p-2 border">التاريخ</th>
+                              <th className="p-2 border">من صرفه</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {rows.length === 0 ? (
+                              <tr><td colSpan="5" className="p-3 border text-center text-slate-500">لا توجد عمليات مطابقة.</td></tr>
+                            ) : rows.map((row) => (
+                              <tr key={row.id}>
+                                <td className="p-2 border font-semibold">{row.name}</td>
+                                <td className="p-2 border">{row.quantityLabel}</td>
+                                <td className="p-2 border font-mono">{row.fileNo}</td>
+                                <td className="p-2 border">{formatDateTime(new Date(row.at))}</td>
+                                <td className="p-2 border">{row.who}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           ) : activeTab === 'settings' && currentUser.role === 'supervisor' ? (
