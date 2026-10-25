@@ -464,15 +464,22 @@ const dispenseRowsBetween = (logs, start, end) => logs
 
 const buildPeriodicArchive = (logs, now = new Date()) => {
   const archive = readArchive();
+  const finishedYears = archive.yearly.filter((item) => /^\d{4}$/.test(String(item.key)));
+  let changed = finishedYears.length !== archive.yearly.length;
+  archive.yearly = finishedYears;
+
   const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const currentYearStart = new Date(now.getFullYear(), 0, 1);
   const dates = logs
     .filter((log) => log.type === 'dispense' || log.action === 'صرف دواء')
     .map(logDate)
     .filter(Boolean);
-  if (dates.length === 0) return archive;
+  if (dates.length === 0) {
+    if (changed) writeArchive(archive);
+    return archive;
+  }
   const earliest = new Date(Math.min(...dates.map((date) => date.getTime())));
   const cursor = new Date(earliest.getFullYear(), earliest.getMonth(), 1);
-  let changed = false;
   while (cursor < currentMonthStart) {
     const start = new Date(cursor);
     const end = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
@@ -488,20 +495,25 @@ const buildPeriodicArchive = (logs, now = new Date()) => {
       });
       changed = true;
     }
-    const yearKey = `${start.getFullYear()}-until-${key}`;
-    if (!archive.yearly.some((item) => item.key === yearKey)) {
-      const yearStart = new Date(start.getFullYear(), 0, 1);
+    cursor.setMonth(cursor.getMonth() + 1);
+  }
+  const yearCursor = new Date(earliest.getFullYear(), 0, 1);
+  while (yearCursor < currentYearStart) {
+    const yearStart = new Date(yearCursor);
+    const yearEnd = new Date(yearStart.getFullYear() + 1, 0, 1);
+    const key = String(yearStart.getFullYear());
+    if (!archive.yearly.some((item) => item.key === key)) {
       archive.yearly.push({
-        key: yearKey,
+        key,
         kind: 'yearly',
-        title: `التقرير السنوي حتى ${start.toLocaleDateString('ar-SA', { month: 'long', year: 'numeric' })}`,
+        title: `التقرير السنوي ${yearStart.toLocaleDateString('ar-SA', { year: 'numeric' })}`,
         start: yearStart.toISOString(),
-        end: new Date(end.getTime() - 1).toISOString(),
-        rows: dispenseRowsBetween(logs, yearStart, end),
+        end: new Date(yearEnd.getTime() - 1).toISOString(),
+        rows: dispenseRowsBetween(logs, yearStart, yearEnd),
       });
       changed = true;
     }
-    cursor.setMonth(cursor.getMonth() + 1);
+    yearCursor.setFullYear(yearStart.getFullYear() + 1);
   }
   if (changed) {
     archive.monthly.sort((a, b) => b.key.localeCompare(a.key));
@@ -1268,7 +1280,8 @@ export default function App() {
     return log.type === logFilter;
   });
 
-  const expenseWindow = expensePeriod === 'dispose' ? { start: new Date(0), end: new Date(8640000000000000) } : periodRange(expensePeriod);
+  const activeExpensePeriod = expensePeriod === 'yearly' || expensePeriod === 'monthly' ? expensePeriod : 'weekly';
+  const expenseWindow = periodRange(activeExpensePeriod);
   const expenseSource = logs
     .filter((log) => log.type === 'dispense' || log.action === 'صرف دواء')
     .map(parseDispenseLog)
@@ -1291,13 +1304,11 @@ export default function App() {
   const expenseRows = expenseSource;
   const expensePillTotal = expenseRows.reduce((sum, row) => sum + row.pills, 0);
   const expenseBoxTotal = expenseRows.reduce((sum, row) => sum + row.boxes, 0);
-  const expensePeriodTitle = expensePeriod === 'weekly'
+  const expensePeriodTitle = activeExpensePeriod === 'weekly'
     ? 'الأسبوعي'
-    : expensePeriod === 'yearly'
+    : activeExpensePeriod === 'yearly'
       ? 'السنوي'
-      : expensePeriod === 'dispose'
-        ? 'الإتلاف'
-        : 'الشهري';
+      : 'الشهري';
   const disposalRows = logs
     .filter((log) => log.type === 'dispose' || log.action === 'إتلاف دواء')
     .map(parseDisposeLog)
@@ -1408,7 +1419,9 @@ export default function App() {
           #printable-report,
           #printable-logs,
           #printable-entry,
-          #printable-archive {
+          #printable-archive,
+          #printable-disposal,
+          #printable-expenses {
             display: block !important;
             position: static !important;
             visibility: visible !important;
@@ -1421,7 +1434,9 @@ export default function App() {
           #printable-report *,
           #printable-logs *,
           #printable-entry *,
-          #printable-archive * {
+          #printable-archive *,
+          #printable-disposal *,
+          #printable-expenses * {
             visibility: visible !important;
             -webkit-print-color-adjust: exact;
             print-color-adjust: exact;
@@ -1429,7 +1444,9 @@ export default function App() {
           #printable-report table,
           #printable-logs table,
           #printable-entry table,
-          #printable-archive table {
+          #printable-archive table,
+          #printable-disposal table,
+          #printable-expenses table {
             width: 100% !important;
             border-collapse: collapse !important;
             page-break-inside: auto;
@@ -1441,7 +1458,11 @@ export default function App() {
           #printable-entry th,
           #printable-entry td,
           #printable-archive th,
-          #printable-archive td {
+          #printable-archive td,
+          #printable-disposal th,
+          #printable-disposal td,
+          #printable-expenses th,
+          #printable-expenses td {
             border: 1px solid #333 !important;
             color: #000 !important;
             background: #fff !important;
@@ -1450,18 +1471,25 @@ export default function App() {
           #printable-logs tr,
           #printable-entry tr,
           #printable-archive tr,
+          #printable-disposal tr,
+          #printable-expenses tr,
           #printable-report h2,
           #printable-report h3,
           #printable-logs h2,
           #printable-entry h2,
-          #printable-archive h2 {
+          #printable-archive h2,
+          #printable-disposal h2,
+          #printable-expenses h2,
+          #printable-expenses h3 {
             break-inside: avoid;
             page-break-inside: avoid;
           }
           #printable-report thead,
           #printable-logs thead,
           #printable-entry thead,
-          #printable-archive thead { display: table-header-group; }
+          #printable-archive thead,
+          #printable-disposal thead,
+          #printable-expenses thead { display: table-header-group; }
           .print-only { display: block !important; }
           .print-sign {
             display: grid !important;
@@ -1528,7 +1556,19 @@ export default function App() {
                   onClick={() => setActiveTab('reports')}
                   className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-2xl text-xs shadow-md transition flex items-center gap-1.5"
                 >
-                  <span>📊 التقارير / PDF</span>
+                  <span>📋 تقرير حالة الأدوية</span>
+                </button>
+                <button
+                  onClick={() => setActiveTab('expenseReport')}
+                  className="px-4 py-2.5 bg-white hover:bg-slate-50 text-slate-700 font-bold rounded-2xl text-xs border border-slate-200/80 shadow-md transition flex items-center gap-1.5"
+                >
+                  <span>💊 تقارير الصرف</span>
+                </button>
+                <button
+                  onClick={() => setActiveTab('disposalReport')}
+                  className="px-4 py-2.5 bg-white hover:bg-slate-50 text-slate-700 font-bold rounded-2xl text-xs border border-slate-200/80 shadow-md transition flex items-center gap-1.5"
+                >
+                  <span>🗑️ تقرير الإتلاف</span>
                 </button>
                 <button
                   onClick={() => setActiveTab('archive')}
@@ -1825,7 +1865,23 @@ export default function App() {
                     activeTab === 'reports' ? 'bg-teal-600 text-white shadow-lg' : 'bg-teal-50 text-teal-700 hover:bg-teal-100 border border-teal-200/60'
                   }`}
                 >
-                  📋 التقارير وحفظ PDF
+                  📋 تقرير حالة الأدوية
+                </button>
+                <button
+                  onClick={() => setActiveTab('expenseReport')}
+                  className={`px-5 py-2.5 rounded-2xl text-xs md:text-sm font-bold transition-all ${
+                    activeTab === 'expenseReport' ? 'bg-sky-700 text-white shadow-lg' : 'bg-white text-sky-800 hover:bg-sky-50 border border-sky-200'
+                  }`}
+                >
+                  💊 تقارير الصرف
+                </button>
+                <button
+                  onClick={() => setActiveTab('disposalReport')}
+                  className={`px-5 py-2.5 rounded-2xl text-xs md:text-sm font-bold transition-all ${
+                    activeTab === 'disposalReport' ? 'bg-red-700 text-white shadow-lg' : 'bg-white text-red-700 hover:bg-red-50 border border-red-200'
+                  }`}
+                >
+                  🗑️ تقرير الإتلاف
                 </button>
                 <button
                   onClick={() => setActiveTab('archive')}
@@ -1907,13 +1963,119 @@ export default function App() {
               </div>
 
             </div>
-          ) : activeTab === 'reports' && currentUser.role === 'supervisor' ? (
-            /* التقارير وحفظ PDF */
+          ) : activeTab === 'expenseReport' && currentUser.role === 'supervisor' ? (
             <div className="p-6 space-y-6 bg-white">
               <div className="flex justify-between items-center no-print border-b pb-4">
                 <div>
-                  <h2 className="text-xl font-black text-slate-900">مركز التقارير الطبية والمخزنية المعتمدة</h2>
-                  <p className="text-xs text-slate-500 mt-1">تقارير موثقة بتواريخ انتهاء الصلاحية ورقم التشغيلات جاهزة للحفظ والتصدير</p>
+                  <h2 className="text-xl font-black text-slate-900">تقارير الصرف</h2>
+                  <p className="text-xs text-slate-500 mt-1">التقارير الأسبوعية والشهرية والسنوية لعمليات الصرف، منفصلة عن تقرير حالة الأدوية.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => window.print()}
+                  className="px-6 py-3 bg-sky-700 hover:bg-sky-600 text-white font-bold rounded-2xl text-xs shadow-lg transition"
+                >
+                  طباعة تقرير الصرف
+                </button>
+              </div>
+              <div id="printable-expenses" className="space-y-4 text-slate-800 bg-white">
+                <div className="text-center border-b pb-4">
+                  <h2 className="text-2xl font-black">تقرير المصروفات {expensePeriodTitle}</h2>
+                  <p className="text-xs text-slate-500 mt-1">تاريخ الإصدار: {new Date().toLocaleDateString('ar-SA')}</p>
+                </div>
+                <div className="flex flex-wrap gap-2 no-print">
+                  {[
+                    ['weekly', 'تقرير أسبوعي'],
+                    ['monthly', 'تقرير شهري'],
+                    ['yearly', 'تقرير سنوي'],
+                  ].map(([period, label]) => (
+                    <button
+                      key={period}
+                      type="button"
+                      onClick={() => setExpensePeriod(period)}
+                      className={`px-4 py-2 rounded-xl text-xs font-bold ${
+                        activeExpensePeriod === period ? 'bg-sky-700 text-white' : 'bg-white text-slate-600 border border-slate-200'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-3 no-print">
+                  <label className="text-xs font-bold text-slate-600 md:col-span-2">
+                    بحث
+                    <input
+                      type="search"
+                      value={expenseQuery}
+                      onChange={(e) => setExpenseQuery(e.target.value)}
+                      placeholder="التاريخ، اسم الصارف، رقم الملف، أو الدواء"
+                      className="mt-1 w-full px-3 py-2 border border-slate-200 rounded-xl font-normal"
+                    />
+                  </label>
+                  <label className="text-xs font-bold text-slate-600">
+                    مجال البحث
+                    <select value={expenseField} onChange={(e) => setExpenseField(e.target.value)} className="mt-1 w-full px-3 py-2 border border-slate-200 rounded-xl font-normal">
+                      <option value="all">كل الحقول</option>
+                      <option value="date">التاريخ</option>
+                      <option value="who">اسم الصارف / الممرضة</option>
+                      <option value="file">رقم ملف المريض</option>
+                      <option value="drug">اسم الدواء</option>
+                    </select>
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="text-xs font-bold text-slate-600">
+                      من تاريخ
+                      <input type="date" value={expenseFrom} onChange={(e) => setExpenseFrom(e.target.value)} className="mt-1 w-full px-2 py-2 border border-slate-200 rounded-xl" />
+                    </label>
+                    <label className="text-xs font-bold text-slate-600">
+                      إلى تاريخ
+                      <input type="date" value={expenseTo} onChange={(e) => setExpenseTo(e.target.value)} className="mt-1 w-full px-2 py-2 border border-slate-200 rounded-xl" />
+                    </label>
+                  </div>
+                </div>
+                <p className="text-xs text-slate-500">
+                  من {expenseWindow.start.toLocaleDateString('ar-SA')} إلى {new Date(expenseWindow.end.getTime() - 1).toLocaleDateString('ar-SA')}
+                  {' '}— {expenseRows.length} عملية صرف
+                  {expenseBoxTotal ? ` — ${expenseBoxTotal} علبة` : ''}
+                  {expensePillTotal ? ` — ${expensePillTotal} حبة` : ''}
+                </p>
+                <table className="w-full text-right border-collapse border border-slate-300 text-xs">
+                  <thead>
+                    <tr className="bg-sky-100">
+                      <th className="p-2 border">اسم الدواء</th>
+                      <th className="p-2 border">الكمية المصروفة</th>
+                      <th className="p-2 border">رقم ملف المريض</th>
+                      <th className="p-2 border">تاريخ ووقت الصرف</th>
+                      <th className="p-2 border">من صرفه</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {expenseRows.length === 0 ? (
+                      <tr>
+                        <td colSpan="5" className="p-4 border text-center text-slate-500">لا توجد عمليات صرف في هذه الفترة.</td>
+                      </tr>
+                    ) : expenseRows.map((row) => (
+                      <tr key={row.id}>
+                        <td className="p-2 border font-semibold">
+                          {row.name}
+                          {row.batch ? <div className="text-[11px] font-mono text-slate-500">دفعة {row.batch}</div> : null}
+                        </td>
+                        <td className="p-2 border font-bold">{row.quantityLabel}</td>
+                        <td className="p-2 border font-mono">{row.fileNo}</td>
+                        <td className="p-2 border">{formatDateTime(row.at)}</td>
+                        <td className="p-2 border">{row.who}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : activeTab === 'reports' && currentUser.role === 'supervisor' ? (
+            <div className="p-6 space-y-6 bg-white">
+              <div className="flex justify-between items-center no-print border-b pb-4">
+                <div>
+                  <h2 className="text-xl font-black text-slate-900">تقرير حالة الأدوية</h2>
+                  <p className="text-xs text-slate-500 mt-1">الأدوية الصالحة، والدفعات قريبة الانتهاء، وسجل المواد التالفة والمستبعدة.</p>
                 </div>
                 <button
                   onClick={() => window.print()}
@@ -1925,138 +2087,8 @@ export default function App() {
 
               <div id="printable-report" className="space-y-6 text-slate-800 bg-white p-2">
                 <div className="text-center border-b pb-4">
-                  <h2 className="text-2xl font-black">تقرير جودة وإدارة أدوية الطوارئ</h2>
+                  <h2 className="text-2xl font-black">تقرير حالة الأدوية</h2>
                   <p className="text-xs text-slate-500 mt-1">تاريخ الإصدار: {new Date().toLocaleDateString('ar-SA')}</p>
-                </div>
-
-                <div className="space-y-2">
-                  <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-                    <h3 className="font-bold text-xs text-sky-900 bg-sky-50 p-2 rounded-lg border border-sky-200">{expensePeriod === 'dispose' ? '🗑️ تقرير الإتلاف' : `💊 تقرير المصروفات ${expensePeriodTitle}`}</h3>
-                    <div className="flex flex-wrap gap-2 no-print">
-                      {[
-                        ['weekly', 'تقرير أسبوعي'],
-                        ['monthly', 'تقرير شهري'],
-                        ['yearly', 'تقرير سنوي'],
-                        ['dispose', 'تقرير الإتلاف'],
-                      ].map(([period, label]) => (
-                        <button
-                          key={period}
-                          type="button"
-                          onClick={() => setExpensePeriod(period)}
-                          className={`px-4 py-2 rounded-xl text-xs font-bold ${
-                            expensePeriod === period ? 'bg-sky-700 text-white' : 'bg-white text-slate-600 border border-slate-200'
-                          }`}
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  {expensePeriod === 'dispose' ? (
-                    <div className="space-y-3">
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 no-print">
-                        <label className="text-xs font-bold text-slate-600">
-                          من تاريخ
-                          <input type="date" value={disposeFrom} onChange={(e) => setDisposeFrom(e.target.value)} className="mt-1 w-full px-3 py-2 border border-slate-200 rounded-xl" />
-                        </label>
-                        <label className="text-xs font-bold text-slate-600">
-                          إلى تاريخ
-                          <input type="date" value={disposeTo} onChange={(e) => setDisposeTo(e.target.value)} className="mt-1 w-full px-3 py-2 border border-slate-200 rounded-xl" />
-                        </label>
-                      </div>
-                      <p className="text-xs text-slate-500">{disposalRows.length} عملية إتلاف</p>
-                      <table className="w-full text-right border-collapse border border-slate-300 text-xs">
-                        <thead>
-                          <tr className="bg-red-100">
-                            <th className="p-2 border">اسم الدواء</th>
-                            <th className="p-2 border">رقم الدفعة</th>
-                            <th className="p-2 border">تاريخ الإتلاف</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {disposalRows.length === 0 ? (
-                            <tr><td colSpan="3" className="p-4 border text-center text-slate-500">لا توجد عمليات إتلاف في هذه الفترة.</td></tr>
-                          ) : disposalRows.map((row) => (
-                            <tr key={row.id}>
-                              <td className="p-2 border font-semibold">{row.name}</td>
-                              <td className="p-2 border font-mono">{row.batch || '—'}</td>
-                              <td className="p-2 border">{formatDateTime(row.at)}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  ) : (
-                  <>
-                  <div className="grid grid-cols-1 md:grid-cols-4 gap-3 no-print">
-                    <label className="text-xs font-bold text-slate-600 md:col-span-2">
-                      بحث
-                      <input
-                        type="search"
-                        value={expenseQuery}
-                        onChange={(e) => setExpenseQuery(e.target.value)}
-                        placeholder="التاريخ، اسم الصارف، رقم الملف، أو الدواء"
-                        className="mt-1 w-full px-3 py-2 border border-slate-200 rounded-xl font-normal"
-                      />
-                    </label>
-                    <label className="text-xs font-bold text-slate-600">
-                      مجال البحث
-                      <select value={expenseField} onChange={(e) => setExpenseField(e.target.value)} className="mt-1 w-full px-3 py-2 border border-slate-200 rounded-xl font-normal">
-                        <option value="all">كل الحقول</option>
-                        <option value="date">التاريخ</option>
-                        <option value="who">اسم الصارف / الممرضة</option>
-                        <option value="file">رقم ملف المريض</option>
-                        <option value="drug">اسم الدواء</option>
-                      </select>
-                    </label>
-                    <div className="grid grid-cols-2 gap-2">
-                      <label className="text-xs font-bold text-slate-600">
-                        من تاريخ
-                        <input type="date" value={expenseFrom} onChange={(e) => setExpenseFrom(e.target.value)} className="mt-1 w-full px-2 py-2 border border-slate-200 rounded-xl" />
-                      </label>
-                      <label className="text-xs font-bold text-slate-600">
-                        إلى تاريخ
-                        <input type="date" value={expenseTo} onChange={(e) => setExpenseTo(e.target.value)} className="mt-1 w-full px-2 py-2 border border-slate-200 rounded-xl" />
-                      </label>
-                    </div>
-                  </div>
-                  <p className="text-xs text-slate-500">
-                    من {expenseWindow.start.toLocaleDateString('ar-SA')} إلى {new Date(expenseWindow.end.getTime() - 1).toLocaleDateString('ar-SA')}
-                    {' '}— {expenseRows.length} عملية صرف
-                    {expenseBoxTotal ? ` — ${expenseBoxTotal} علبة` : ''}
-                    {expensePillTotal ? ` — ${expensePillTotal} حبة` : ''}
-                  </p>
-                  <table className="w-full text-right border-collapse border border-slate-300 text-xs">
-                    <thead>
-                      <tr className="bg-sky-100">
-                        <th className="p-2 border">اسم الدواء</th>
-                        <th className="p-2 border">الكمية المصروفة</th>
-                        <th className="p-2 border">رقم ملف المريض</th>
-                        <th className="p-2 border">تاريخ ووقت الصرف</th>
-                        <th className="p-2 border">من صرفه</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {expenseRows.length === 0 ? (
-                        <tr>
-                          <td colSpan="5" className="p-4 border text-center text-slate-500">لا توجد عمليات صرف في هذه الفترة.</td>
-                        </tr>
-                      ) : expenseRows.map((row) => (
-                        <tr key={row.id}>
-                          <td className="p-2 border font-semibold">
-                            {row.name}
-                            {row.batch ? <div className="text-[11px] font-mono text-slate-500">دفعة {row.batch}</div> : null}
-                          </td>
-                          <td className="p-2 border font-bold">{row.quantityLabel}</td>
-                          <td className="p-2 border font-mono">{row.fileNo}</td>
-                          <td className="p-2 border">{formatDateTime(row.at)}</td>
-                          <td className="p-2 border">{row.who}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  </>
-                  )}
                 </div>
 
                 <div className="space-y-2">
@@ -2102,12 +2134,65 @@ export default function App() {
                 </div>
               </div>
             </div>
+          ) : activeTab === 'disposalReport' && currentUser.role === 'supervisor' ? (
+            <div className="p-6 space-y-6 bg-white">
+              <div className="flex justify-between items-center no-print border-b pb-4">
+                <div>
+                  <h2 className="text-xl font-black text-slate-900">تقرير الإتلاف</h2>
+                  <p className="text-xs text-slate-500 mt-1">سجل عمليات الإتلاف بتاريخها، منفصل عن تقرير حالة الأدوية.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => window.print()}
+                  className="px-6 py-3 bg-red-700 hover:bg-red-600 text-white font-bold rounded-2xl text-xs shadow-lg transition"
+                >
+                  طباعة تقرير الإتلاف
+                </button>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 no-print">
+                <label className="text-xs font-bold text-slate-600">
+                  من تاريخ
+                  <input type="date" value={disposeFrom} onChange={(e) => setDisposeFrom(e.target.value)} className="mt-1 w-full px-3 py-2 border border-slate-200 rounded-xl" />
+                </label>
+                <label className="text-xs font-bold text-slate-600">
+                  إلى تاريخ
+                  <input type="date" value={disposeTo} onChange={(e) => setDisposeTo(e.target.value)} className="mt-1 w-full px-3 py-2 border border-slate-200 rounded-xl" />
+                </label>
+              </div>
+              <div id="printable-disposal" className="space-y-4 text-slate-800 bg-white">
+                <div className="text-center border-b pb-4">
+                  <h2 className="text-2xl font-black">تقرير الإتلاف</h2>
+                  <p className="text-xs text-slate-500 mt-1">تاريخ الإصدار: {new Date().toLocaleDateString('ar-SA')}</p>
+                </div>
+                <p className="text-xs text-slate-500">{disposalRows.length} عملية إتلاف</p>
+                <table className="w-full text-right border-collapse border border-slate-300 text-xs">
+                  <thead>
+                    <tr className="bg-red-100">
+                      <th className="p-2 border">اسم الدواء</th>
+                      <th className="p-2 border">رقم الدفعة</th>
+                      <th className="p-2 border">تاريخ الإتلاف</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {disposalRows.length === 0 ? (
+                      <tr><td colSpan="3" className="p-4 border text-center text-slate-500">لا توجد عمليات إتلاف في هذه الفترة.</td></tr>
+                    ) : disposalRows.map((row) => (
+                      <tr key={row.id}>
+                        <td className="p-2 border font-semibold">{row.name}</td>
+                        <td className="p-2 border font-mono">{row.batch || '—'}</td>
+                        <td className="p-2 border">{formatDateTime(row.at)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           ) : activeTab === 'archive' && currentUser.role === 'supervisor' ? (
             <div className="p-6 space-y-5 bg-white">
               <div className="flex justify-between items-center no-print border-b pb-4">
                 <div>
                   <h2 className="text-xl font-black text-slate-900">الأرشيف</h2>
-                  <p className="text-xs text-slate-500 mt-1">تقارير الإدخال الفوري محفوظة هنا، والتقارير الشهرية والسنوية تُنقل تلقائياً مع بداية كل شهر جديد.</p>
+                  <p className="text-xs text-slate-500 mt-1">تقارير الإدخال الفوري محفوظة هنا. التقارير الشهرية تُنقل مع بداية كل شهر جديد، والتقارير السنوية تُنقل مع بداية كل سنة بعد انتهائها.</p>
                 </div>
                 <button type="button" onClick={() => window.print()} className="px-5 py-2.5 bg-slate-900 text-white font-bold rounded-2xl text-xs">طباعة الأرشيف</button>
               </div>
@@ -2168,7 +2253,7 @@ export default function App() {
                     </tbody>
                   </table>
                 ) : archiveReports.length === 0 ? (
-                  <p className="text-sm text-slate-500">لا توجد تقارير مؤرشفة مطابقة. التقارير المكتملة تُنقل هنا عند دخول شهر جديد.</p>
+                  <p className="text-sm text-slate-500">{archiveKind === 'yearly' ? 'لا توجد تقارير سنوية مؤرشفة. التقرير السنوي يُنقل هنا مع بداية السنة الجديدة بعد انتهاء السنة.' : 'لا توجد تقارير شهرية مؤرشفة. التقرير الشهري يُنقل هنا مع بداية الشهر الجديد.'}</p>
                 ) : archiveReports.map((report) => {
                   const rows = (report.rows || []).filter((row) => !archiveQuery.trim() || String(row.name || '').includes(archiveQuery.trim()));
                   const open = openArchiveKey === report.key;
