@@ -72,13 +72,97 @@ const formatDispenser = (value) => {
 
 const canManageItems = (user) => user?.role === 'supervisor' || user?.role === 'data_entry';
 
-const NURSE_USERNAMES = ['nurse_1', 'nurse_2', 'nurse_3', 'nurse_4'];
-const NURSE_PASSWORDS = {
-  nurse: 'Nn@1234',
-  nurse_1: 'N1@6294',
-  nurse_2: 'N2@8537',
-  nurse_3: 'N3@4718',
-  nurse_4: 'N4@2065',
+const ACCOUNTS_STORAGE_KEY = 'emergency_staff_accounts_v1';
+const ACCOUNT_ROLES = ['supervisor', 'data_entry', 'nurse'];
+
+const builtinAccounts = () => ([
+  { username: 'supervisor', fullName: 'مشرف', role: 'supervisor', password: 'Ss@102938', blocked: false },
+  { username: 'data_entry', fullName: 'مدخل البيانات', role: 'data_entry', password: 'Dd@1234', blocked: false },
+  { username: 'nurse', fullName: 'ممرضة', role: 'nurse', password: 'Nn@1234', blocked: false },
+  { username: 'nurse_1', fullName: 'عليا', role: 'nurse', password: 'N1@6294', blocked: false },
+  { username: 'nurse_2', fullName: 'رضا', role: 'nurse', password: 'N2@8537', blocked: false },
+  { username: 'nurse_3', fullName: 'اماني', role: 'nurse', password: 'N3@4718', blocked: false },
+  { username: 'nurse_4', fullName: 'اسماء', role: 'nurse', password: 'N4@2065', blocked: false },
+]);
+
+const normalizeAccount = (row) => {
+  const role = ACCOUNT_ROLES.includes(row?.role) ? row.role : 'nurse';
+  return {
+    username: String(row?.username || '').trim().toLowerCase(),
+    fullName: String(row?.fullName || row?.full_name || '').trim(),
+    role,
+    password: String(row?.password || ''),
+    blocked: row?.blocked === true || row?.blocked === 'true',
+    profileId: row?.profileId || null,
+  };
+};
+
+const readLocalAccounts = () => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(ACCOUNTS_STORAGE_KEY) || '[]');
+    return Array.isArray(saved) ? saved.map(normalizeAccount).filter((row) => row.username && row.password) : [];
+  } catch {
+    return [];
+  }
+};
+
+const mergeAccounts = (base, extra) => {
+  const map = new Map((base || []).map((account) => [account.username, account]));
+  for (const account of extra || []) {
+    if (!account?.username) continue;
+    map.set(account.username, { ...map.get(account.username), ...account, username: account.username });
+  }
+  const roleOrder = { supervisor: 0, data_entry: 1, nurse: 2 };
+  return [...map.values()].sort((a, b) => (
+    (roleOrder[a.role] ?? 9) - (roleOrder[b.role] ?? 9) || a.username.localeCompare(b.username)
+  ));
+};
+
+let accountsRemoteReady = false;
+
+const loadAccountList = async () => {
+  const local = mergeAccounts(builtinAccounts(), readLocalAccounts());
+  const { data, error } = await supabase
+    .from('staff_accounts')
+    .select('username,full_name,role,password,blocked');
+  if (error) {
+    accountsRemoteReady = false;
+    return local;
+  }
+  accountsRemoteReady = true;
+  const remote = (data || []).map(normalizeAccount).filter((row) => row.username && row.password);
+  if (remote.length === 0) {
+    const seed = local.map((account) => ({
+      username: account.username,
+      full_name: account.fullName,
+      role: account.role,
+      password: account.password,
+      blocked: account.blocked,
+    }));
+    const { error: seedError } = await supabase.from('staff_accounts').upsert(seed, { onConflict: 'username' });
+    if (seedError) console.error(seedError);
+    return local;
+  }
+  return mergeAccounts(local, remote);
+};
+
+const saveAccountList = async (list) => {
+  localStorage.setItem(ACCOUNTS_STORAGE_KEY, JSON.stringify(list));
+  if (!accountsRemoteReady) {
+    const probe = await supabase.from('staff_accounts').select('username').limit(1);
+    accountsRemoteReady = !probe.error;
+  }
+  if (!accountsRemoteReady) return { remote: false };
+  const payload = list.map((account) => ({
+    username: account.username,
+    full_name: account.fullName,
+    role: account.role,
+    password: account.password,
+    blocked: Boolean(account.blocked),
+  }));
+  const { error } = await supabase.from('staff_accounts').upsert(payload, { onConflict: 'username' });
+  if (error) console.error(error);
+  return { remote: !error, error };
 };
 const KNOWN_NURSE_IDS = {
   'ae5fe82f-0b40-4292-923c-4154f12a4ac0': 'nurse_1',
@@ -109,6 +193,17 @@ const STORAGE_OPTIONS = ['حرارة الغرفة', 'يحفظ في الثلاج�
 
 let inventorySupportsStorage = false;
 let inventorySupportsUnits = false;
+let inventorySupportsAlert = false;
+
+const lowStockLimitOf = (item) => {
+  const limit = Math.floor(Number(item?.lowStockAlert));
+  return Number.isInteger(limit) && limit >= 0 ? limit : 6;
+};
+
+const isLowStock = (item) => (
+  totalUnitsOf(item) > 0
+  && Math.floor(totalUnitsOf(item) / unitsPerBoxOf(item)) <= lowStockLimitOf(item)
+);
 
 const unitsPerBoxOf = (item) => {
   const count = Math.floor(Number(item?.unitsPerBox));
@@ -172,6 +267,7 @@ const inventorySelect = () => {
   let columns = INVENTORY_COLUMNS;
   if (inventorySupportsStorage) columns += ',storage_quality';
   if (inventorySupportsUnits) columns += ',units_per_box,total_units';
+  if (inventorySupportsAlert) columns += ',low_stock_alert';
   return columns;
 };
 
@@ -198,6 +294,9 @@ const toDbItem = (item) => {
     row.units_per_box = perBox;
     row.total_units = total;
   }
+  if (inventorySupportsAlert) {
+    row.low_stock_alert = lowStockLimitOf(item);
+  }
   return row;
 };
 
@@ -219,6 +318,7 @@ const fromDbItem = (row, fallback) => {
     category: row.category,
     status: row.status,
     storageQuality: row.storage_quality || fallbackQuality || 'حرارة الغرفة',
+    lowStockAlert: lowStockLimitOf({ lowStockAlert: row.low_stock_alert ?? fallbackItem?.lowStockAlert }),
   }, totalUnits, unitsPerBox);
 };
 
@@ -384,11 +484,15 @@ export default function App() {
     expiryDate: '',
     category: 'أدوية',
     storageQuality: 'حرارة الغرفة',
+    lowStockAlert: 6,
   });
   const [editingId, setEditingId] = useState(null);
   const [entrySlip, setEntrySlip] = useState(null);
   const [profiles, setProfiles] = useState([]);
-  const [profileDrafts, setProfileDrafts] = useState({});
+  const [accounts, setAccounts] = useState(() => mergeAccounts(builtinAccounts(), readLocalAccounts()));
+  const [accountDrafts, setAccountDrafts] = useState({});
+  const [accountsOnServer, setAccountsOnServer] = useState(false);
+  const [newAccount, setNewAccount] = useState({ username: '', fullName: '', role: 'nurse', password: '' });
 
   const barcodeRef = useRef(null);
   const messageTimer = useRef(null);
@@ -436,6 +540,8 @@ export default function App() {
       inventorySupportsStorage = !storageProbe.error;
       const unitsProbe = await supabase.from('inventory').select('units_per_box,total_units').limit(1);
       inventorySupportsUnits = !unitsProbe.error;
+      const alertProbe = await supabase.from('inventory').select('low_stock_alert').limit(1);
+      inventorySupportsAlert = !alertProbe.error;
 
       const { data: inventoryRows, error: inventoryError } = await supabase
         .from('inventory')
@@ -503,10 +609,33 @@ export default function App() {
         .select('id, role, full_name')
         .eq('role', 'nurse')
         .order('id', { ascending: true });
+      const mapped = mapNurseProfiles(profileRows);
       if (!cancelled && profileRows) {
-        const mapped = mapNurseProfiles(profileRows);
         setProfiles(mapped);
-        setProfileDrafts(Object.fromEntries(mapped.map((row) => [row.id, row.full_name || ''])));
+      }
+      const accountList = await loadAccountList();
+      if (!cancelled) {
+        const named = accountList.map((account) => {
+          const profile = mapped.find((row) => row.username === account.username);
+          const builtin = builtinAccounts().find((row) => row.username === account.username);
+          const fullName = profile?.full_name && (!builtin || account.fullName === builtin.fullName)
+            ? profile.full_name
+            : account.fullName;
+          return { ...account, fullName, profileId: profile?.id || null };
+        });
+        setAccounts(named);
+        setAccountsOnServer(accountsRemoteReady);
+        setAccountDrafts(Object.fromEntries(named.map((account) => [account.username, {
+          fullName: account.fullName,
+          role: account.role,
+          password: '',
+          blocked: account.blocked,
+        }])));
+        const sessionName = currentUser?.username || (currentUser?.id === 'ADM-101' ? 'supervisor' : currentUser?.id);
+        if (named.some((account) => account.username === sessionName && account.blocked)) {
+          setCurrentUser(null);
+          setLoginError('هذا الحساب محظور. راجعي المشرف.');
+        }
       }
     };
 
@@ -572,47 +701,34 @@ export default function App() {
 
     const username = loginForm.username.trim().toLowerCase();
     const password = loginForm.password.trim();
+    const accountList = await loadAccountList();
+    setAccounts(accountList);
+    setAccountsOnServer(accountsRemoteReady);
+    const account = accountList.find((row) => row.username === username);
 
-    if (username === 'supervisor' && password === 'Ss@102938') {
-      const user = { name: 'مشرف', role: 'supervisor', id: 'ADM-101' };
-      setCurrentUser(user);
-      setActiveTab('all');
-      addLog('تسجيل دخول', 'تسجيل دخول', 'system', user);
-      playSound('success');
-    } else if (username === 'data_entry' && password === 'Dd@1234') {
-      const user = { name: 'مدخل البيانات', role: 'data_entry', id: 'DATA-1' };
-      setCurrentUser(user);
-      setScanMode('checkin');
-      setActiveTab('all');
-      addLog('تسجيل دخول', 'تسجيل دخول', 'system', user);
-      playSound('success');
-    } else if (NURSE_PASSWORDS[username] && password === NURSE_PASSWORDS[username]) {
-      let nurseProfiles = profiles;
-      if (nurseProfiles.length === 0) {
-        const { data } = await supabase
-          .from('profiles')
-          .select('id, role, full_name')
-          .eq('role', 'nurse')
-          .order('id', { ascending: true });
-        nurseProfiles = mapNurseProfiles(data);
-        setProfiles(nurseProfiles);
-        setProfileDrafts(Object.fromEntries(nurseProfiles.map((row) => [row.id, row.full_name || ''])));
-      }
-      const profile = nurseProfiles.find((row) => row.username === username);
-      const user = {
-        name: profile?.full_name || 'ممرضة',
-        role: 'nurse',
-        id: username,
-      };
-      setCurrentUser(user);
-      setScanMode('dispense');
-      setActiveTab('all');
-      addLog('تسجيل دخول', 'تسجيل دخول', 'system', user);
-      playSound('success');
-    } else {
+    if (!account || account.password !== password) {
       setLoginError('اسم المستخدم أو كلمة المرور غير صحيحة!');
       playSound('error');
+      return;
     }
+    if (account.blocked) {
+      setLoginError('هذا الحساب محظور. راجعي المشرف.');
+      playSound('error');
+      return;
+    }
+
+    const user = {
+      name: account.fullName || actorLabel({ role: account.role }),
+      role: account.role,
+      id: account.username,
+      username: account.username,
+    };
+    setCurrentUser(user);
+    setActiveTab('all');
+    if (account.role === 'data_entry') setScanMode('checkin');
+    if (account.role === 'nurse') setScanMode('dispense');
+    addLog('تسجيل دخول', 'تسجيل دخول', 'system', user);
+    playSound('success');
   };
 
   const handleLogout = () => {
@@ -664,7 +780,7 @@ export default function App() {
     return days > 0 && days <= 30;
   });
   const expiredItems = activeItems.filter(i => calculateExpiryDays(i.expiryDate) <= 0);
-  const lowStockItems = activeItems.filter(i => totalUnitsOf(i) > 0 && Math.floor(totalUnitsOf(i) / unitsPerBoxOf(i)) <= 6);
+  const lowStockItems = activeItems.filter(isLowStock);
   const outOfStockItems = activeItems.filter(i => totalUnitsOf(i) === 0);
 
   const expiredCount = expiredItems.filter(i => totalUnitsOf(i) > 0).length;
@@ -796,6 +912,7 @@ export default function App() {
       expiryDate: '',
       category: 'أدوية',
       storageQuality: 'حرارة الغرفة',
+      lowStockAlert: 6,
     });
   };
 
@@ -811,6 +928,7 @@ export default function App() {
       expiryDate: item.expiryDate,
       category: item.category === 'أدوية حرجة' ? 'أدوية' : item.category,
       storageQuality: item.storageQuality || 'حرارة الغرفة',
+      lowStockAlert: lowStockLimitOf(item),
     });
     setShowAddForm(true);
     setActiveTab('all');
@@ -843,8 +961,9 @@ export default function App() {
     }
 
     const perBox = Math.floor(Number(newItem.unitsPerBox));
-    if (!newItem.name || !newItem.barcode || !newItem.batchNo || !newItem.expiryDate || !newItem.storageQuality || perBox < 1) {
-      alert('يرجى ملء جميع الحقول المطلوبة، بما فيها جودة الحفظ وعدد حبات العلبة.');
+    const alertAt = Number(newItem.lowStockAlert);
+    if (!newItem.name || !newItem.barcode || !newItem.batchNo || !newItem.expiryDate || !newItem.storageQuality || perBox < 1 || !Number.isInteger(alertAt) || alertAt < 0) {
+      alert('يرجى ملء جميع الحقول المطلوبة، بما فيها جودة الحفظ وعدد حبات العلبة وحد تنبيه النفاذ.');
       return;
     }
 
@@ -860,17 +979,18 @@ export default function App() {
       expiryDate: newItem.expiryDate,
       category: newItem.category,
       storageQuality: newItem.storageQuality,
+      lowStockAlert: alertAt,
       status: previous?.status || 'active',
     }, boxes * perBox + loose, perBox);
 
     if (editingId) {
       setItems((prev) => prev.map((item) => item.id === editingId ? { ...item, ...savedItem } : item));
       showMessage(`تم تعديل الصنف (${savedItem.name}).`, 'success');
-      addLog('تعديل صنف', `تعديل ${savedItem.name} (دفعة ${savedItem.batchNo}) — ${savedItem.unitsPerBox} حبة/علبة — ${savedItem.storageQuality}`, 'edit');
+      addLog('تعديل صنف', `تعديل ${savedItem.name} (دفعة ${savedItem.batchNo}) — ${savedItem.unitsPerBox} حبة/علبة — تنبيه النفاذ ${savedItem.lowStockAlert} علبة — ${savedItem.storageQuality}`, 'edit');
     } else {
       setItems((prev) => [...prev, savedItem]);
       showMessage(`تم إضافة الصنف (${savedItem.name}).`, 'success');
-      addLog('تسجيل صنف', `تسجيل شحنة جديدة: ${savedItem.name} (كمية ${savedItem.quantity} علبة × ${savedItem.unitsPerBox} حبة) — ${savedItem.storageQuality}`, 'add');
+      addLog('تسجيل صنف', `تسجيل شحنة جديدة: ${savedItem.name} (كمية ${savedItem.quantity} علبة × ${savedItem.unitsPerBox} حبة) — تنبيه النفاذ ${savedItem.lowStockAlert} علبة — ${savedItem.storageQuality}`, 'add');
     }
 
     setEntrySlip({ ...savedItem, action: editingId ? 'تعديل' : 'إدخال' });
@@ -880,33 +1000,102 @@ export default function App() {
     playSound('success');
   };
 
-  const handleSaveProfiles = async () => {
+  const publishAccounts = async (list, message) => {
     if (currentUser?.role !== 'supervisor') return;
-    let failed = false;
-    const next = [];
-    for (const profile of profiles) {
-      const fullName = (profileDrafts[profile.id] || '').trim();
-      if (!fullName) {
-        alert(`اسم الحساب ${profile.username} مطلوب.`);
-        return;
-      }
-      const { error } = await supabase
-        .from('profiles')
-        .update({ full_name: fullName })
-        .eq('id', profile.id);
-      if (error) {
-        console.error(error);
-        failed = true;
-      }
-      next.push({ ...profile, full_name: fullName });
-    }
-    if (failed) {
-      showMessage('تعذر حفظ بعض الأسماء في جدول الحسابات.', 'error');
+    const result = await saveAccountList(list);
+    setAccounts(list);
+    setAccountsOnServer(result.remote);
+    setAccountDrafts(Object.fromEntries(list.map((account) => [account.username, {
+      fullName: account.fullName,
+      role: account.role,
+      password: '',
+      blocked: account.blocked,
+    }])));
+    if (result.error) {
+      showMessage('تعذر حفظ الحسابات على الخادم. بقيت محفوظة على هذا المتصفح.', 'error');
       return;
     }
-    setProfiles(next);
-    showMessage('تم حفظ أسماء حسابات التمريض.', 'success');
-    addLog('تعديل حسابات', 'تحديث أسماء حسابات التمريض', 'system');
+    showMessage(message, 'success');
+  };
+
+  const handleSaveAccount = async (username) => {
+    if (currentUser?.role !== 'supervisor') return;
+    const current = accounts.find((account) => account.username === username);
+    const draft = accountDrafts[username];
+    if (!current || !draft) return;
+    const fullName = draft.fullName.trim();
+    if (!fullName) {
+      alert('اسم الحساب مطلوب.');
+      return;
+    }
+    const password = draft.password.trim() || current.password;
+    if (password.length < 4) {
+      alert('كلمة المرور يجب أن تكون ٤ أحرف على الأقل.');
+      return;
+    }
+    const sessionName = currentUser.username || (currentUser.id === 'ADM-101' ? 'supervisor' : currentUser.id);
+    if (draft.blocked && username === sessionName) {
+      alert('لا يمكن حظر الحساب الذي تستخدمه الآن.');
+      return;
+    }
+    if (username === 'supervisor' && (draft.role !== 'supervisor' || draft.blocked)) {
+      alert('حساب المشرف الأساسي يبقى مفتوحاً بصلاحية المشرف.');
+      return;
+    }
+    const nextAccount = {
+      ...current,
+      fullName,
+      role: draft.role,
+      password,
+      blocked: username === 'supervisor' ? false : Boolean(draft.blocked),
+    };
+    const activeSupervisors = accounts.filter((account) => {
+      const role = account.username === username ? nextAccount.role : account.role;
+      const blocked = account.username === username ? nextAccount.blocked : account.blocked;
+      return role === 'supervisor' && !blocked;
+    });
+    if (activeSupervisors.length === 0) {
+      alert('يجب أن يبقى مشرف واحد على الأقل بدون حظر.');
+      return;
+    }
+    const list = mergeAccounts(accounts, [nextAccount]);
+    if (nextAccount.profileId) {
+      const { error } = await supabase.from('profiles').update({ full_name: fullName }).eq('id', nextAccount.profileId);
+      if (error) console.error(error);
+      setProfiles((prev) => prev.map((profile) => profile.id === nextAccount.profileId ? { ...profile, full_name: fullName } : profile));
+    }
+    await publishAccounts(list, `تم حفظ حساب ${username}.`);
+    addLog('تعديل حساب', `تحديث حساب ${username}`, 'system');
+  };
+
+  const handleAddAccount = async (e) => {
+    e.preventDefault();
+    if (currentUser?.role !== 'supervisor') return;
+    const username = newAccount.username.trim().toLowerCase();
+    const fullName = newAccount.fullName.trim();
+    const password = newAccount.password.trim();
+    if (!/^[a-z0-9_]{3,30}$/.test(username)) {
+      alert('اسم المستخدم حروف إنجليزية صغيرة وأرقام وشرطة سفلية، من ٣ إلى ٣٠.');
+      return;
+    }
+    if (accounts.some((account) => account.username === username)) {
+      alert('اسم المستخدم موجود مسبقاً.');
+      return;
+    }
+    if (!fullName || password.length < 4) {
+      alert('الاسم وكلمة المرور مطلوبان، وكلمة المرور ٤ أحرف على الأقل.');
+      return;
+    }
+    const list = mergeAccounts(accounts, [{
+      username,
+      fullName,
+      role: ACCOUNT_ROLES.includes(newAccount.role) ? newAccount.role : 'nurse',
+      password,
+      blocked: false,
+    }]);
+    await publishAccounts(list, `تمت إضافة الحساب ${username}.`);
+    setNewAccount({ username: '', fullName: '', role: 'nurse', password: '' });
+    addLog('إضافة حساب', `إضافة حساب ${username}`, 'system');
   };
 
   const showMessage = (text, type) => {
@@ -918,7 +1107,7 @@ export default function App() {
   const filteredItems = items.filter(item => {
     if (activeTab === 'disposed') return item.status === 'disposed';
     if (item.status !== 'active') return false;
-    if (activeTab === 'lowStock') return totalUnitsOf(item) > 0 && Math.floor(totalUnitsOf(item) / unitsPerBoxOf(item)) <= 6;
+    if (activeTab === 'lowStock') return isLowStock(item);
     if (activeTab === 'expiryAlert') return calculateExpiryDays(item.expiryDate) <= 30;
     return true;
   });
@@ -1257,7 +1446,7 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div>
                   <label className="block text-slate-700 font-bold mb-1">حبات العلبة الواحدة *</label>
                   <input
@@ -1269,6 +1458,19 @@ export default function App() {
                     onChange={(e) => setNewItem({ ...newItem, unitsPerBox: e.target.value })}
                     className="w-full px-4 py-3 bg-slate-50/80 border border-slate-200 rounded-2xl text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 transition"
                   />
+                </div>
+                <div>
+                  <label className="block text-slate-700 font-bold mb-1">تنبيه النفاذ (بالعلبة) *</label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    required
+                    value={newItem.lowStockAlert}
+                    onChange={(e) => setNewItem({ ...newItem, lowStockAlert: e.target.value })}
+                    className="w-full px-4 py-3 bg-slate-50/80 border border-slate-200 rounded-2xl text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 transition"
+                  />
+                  <p className="text-[11px] text-slate-500 mt-1">يظهر التنبيه عندما يصبح عدد العلب عند هذا الرقم أو أقل.</p>
                 </div>
                 <div>
                   <label className="block text-slate-700 font-bold mb-1">جودة الحفظ *</label>
@@ -1320,7 +1522,7 @@ export default function App() {
 
           <div className="bg-white/80 backdrop-blur-xl p-5 rounded-3xl border border-yellow-100 shadow-xl shadow-yellow-500/5 hover:-translate-y-1 transition-all duration-300">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-bold text-slate-400">منخفض المخزون (≤6)</span>
+              <span className="text-xs font-bold text-slate-400">منخفض المخزون</span>
               <span className="p-2 rounded-xl bg-yellow-50 text-yellow-600 text-sm">🟡</span>
             </div>
             <p className="text-3xl font-black text-yellow-600 mt-3">{lowStockCount}</p>
@@ -1369,7 +1571,7 @@ export default function App() {
                 activeTab === 'lowStock' ? 'bg-amber-500 text-white shadow-lg' : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200/60'
               }`}
             >
-              تنبيه النفاذ ≤6
+              تنبيه النفاذ
             </button>
 
             <button
@@ -1618,35 +1820,137 @@ export default function App() {
               </div>
             </div>
           ) : activeTab === 'settings' && currentUser.role === 'supervisor' ? (
-            <div className="p-6 space-y-5 bg-white">
+            <div className="p-6 space-y-6 bg-white">
               <div>
-                <h2 className="text-xl font-black text-slate-900">إعدادات حسابات التمريض</h2>
-                <p className="text-xs text-slate-500 mt-1">تعديل أسماء الحسابات nurse_1 حتى nurse_4 وحفظها في جدول الحسابات.</p>
+                <h2 className="text-xl font-black text-slate-900">إدارة الحسابات</h2>
+                <p className="text-xs text-slate-500 mt-1">تغيير كلمة المرور، حظر الحساب، أو إضافة حساب جديد. هذه الصفحة للمشرف فقط.</p>
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {profiles.map((profile) => (
-                  <div key={profile.id}>
-                    <label htmlFor={`nurse-name-${profile.id}`} className="block text-slate-700 font-bold mb-1 text-sm">{profile.username}</label>
-                    <input
-                      id={`nurse-name-${profile.id}`}
-                      type="text"
-                      value={profileDrafts[profile.id] || ''}
-                      onChange={(e) => setProfileDrafts({ ...profileDrafts, [profile.id]: e.target.value })}
-                      className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-slate-800"
-                    />
-                  </div>
-                ))}
-              </div>
-              {profiles.length === 0 && (
-                <p className="text-sm text-slate-500">لا توجد حسابات تمريض في الجدول حالياً.</p>
+              {!accountsOnServer && (
+                <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-2xl p-4 space-y-2">
+                  <p className="font-bold">الحسابات تُحفظ على هذا المتصفح. حتى تعمل على بقية الأجهزة، أنشئي هذا الجدول في Supabase ثم أعيدي فتح الصفحة:</p>
+                  <pre className="whitespace-pre-wrap font-mono text-[11px] leading-6 bg-white border border-amber-100 rounded-xl p-3">{`create table if not exists public.staff_accounts (
+  username text primary key,
+  full_name text not null,
+  role text not null,
+  password text not null,
+  blocked boolean not null default false
+);
+alter table public.staff_accounts enable row level security;
+create policy "staff accounts open" on public.staff_accounts
+  for all using (true) with check (true);`}</pre>
+                </div>
               )}
-              <button
-                type="button"
-                onClick={handleSaveProfiles}
-                className="px-6 py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-2xl text-sm"
-              >
-                حفظ الأسماء
-              </button>
+              <div className="space-y-4">
+                {accounts.map((account) => {
+                  const draft = accountDrafts[account.username] || {
+                    fullName: account.fullName,
+                    role: account.role,
+                    password: '',
+                    blocked: account.blocked,
+                  };
+                  return (
+                    <div key={account.username} className="border border-slate-200 rounded-3xl p-4 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="font-black text-slate-900">{account.username}</p>
+                        <span className={`px-3 py-1 rounded-full text-xs font-bold ${draft.blocked ? 'bg-red-50 text-red-600' : 'bg-emerald-50 text-emerald-700'}`}>
+                          {draft.blocked ? 'محظور' : 'نشط'}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-slate-700 font-bold mb-1 text-xs">الاسم</label>
+                          <input
+                            type="text"
+                            value={draft.fullName}
+                            onChange={(e) => setAccountDrafts({ ...accountDrafts, [account.username]: { ...draft, fullName: e.target.value } })}
+                            className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-slate-800 text-sm"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-slate-700 font-bold mb-1 text-xs">الصلاحية</label>
+                          <select
+                            value={draft.role}
+                            onChange={(e) => setAccountDrafts({ ...accountDrafts, [account.username]: { ...draft, role: e.target.value } })}
+                            className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-slate-800 text-sm"
+                          >
+                            <option value="nurse">ممرضة</option>
+                            <option value="data_entry">مدخل البيانات</option>
+                            <option value="supervisor">مشرف</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-slate-700 font-bold mb-1 text-xs">كلمة المرور الجديدة</label>
+                          <input
+                            type="password"
+                            autoComplete="new-password"
+                            placeholder="اتركيها فارغة للإبقاء على الحالية"
+                            value={draft.password}
+                            onChange={(e) => setAccountDrafts({ ...accountDrafts, [account.username]: { ...draft, password: e.target.value } })}
+                            className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-slate-800 text-sm"
+                          />
+                        </div>
+                        <label className="flex items-center gap-2 text-sm font-bold text-slate-700 mt-6">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(draft.blocked)}
+                            onChange={(e) => setAccountDrafts({ ...accountDrafts, [account.username]: { ...draft, blocked: e.target.checked } })}
+                          />
+                          حظر هذا الحساب
+                        </label>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleSaveAccount(account.username)}
+                        className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-2xl text-xs"
+                      >
+                        حفظ الحساب
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+              <form onSubmit={handleAddAccount} className="border border-dashed border-slate-300 rounded-3xl p-4 space-y-3">
+                <h3 className="font-black text-slate-900">إضافة حساب</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <input
+                    type="text"
+                    required
+                    placeholder="اسم المستخدم"
+                    value={newAccount.username}
+                    onChange={(e) => setNewAccount({ ...newAccount, username: e.target.value })}
+                    className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm"
+                  />
+                  <input
+                    type="text"
+                    required
+                    placeholder="الاسم الظاهر"
+                    value={newAccount.fullName}
+                    onChange={(e) => setNewAccount({ ...newAccount, fullName: e.target.value })}
+                    className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm"
+                  />
+                  <select
+                    value={newAccount.role}
+                    onChange={(e) => setNewAccount({ ...newAccount, role: e.target.value })}
+                    className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm"
+                  >
+                    <option value="nurse">ممرضة</option>
+                    <option value="data_entry">مدخل البيانات</option>
+                    <option value="supervisor">مشرف</option>
+                  </select>
+                  <input
+                    type="password"
+                    required
+                    autoComplete="new-password"
+                    placeholder="كلمة المرور"
+                    value={newAccount.password}
+                    onChange={(e) => setNewAccount({ ...newAccount, password: e.target.value })}
+                    className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm"
+                  />
+                </div>
+                <button type="submit" className="px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-2xl text-xs">
+                  إضافة الحساب
+                </button>
+              </form>
             </div>
           ) : activeTab === 'entryReport' && canManageItems(currentUser) ? (
             <div className="p-6 space-y-4 bg-white">
@@ -1681,6 +1985,7 @@ export default function App() {
                         <tr><th className="p-2 border bg-slate-50">السعر</th><td className="p-2 border">{Number(entrySlip.price || 0).toFixed(2)} ر.س</td></tr>
                         <tr><th className="p-2 border bg-slate-50">تاريخ الانتهاء</th><td className="p-2 border">{entrySlip.expiryDate}</td></tr>
                         <tr><th className="p-2 border bg-slate-50">الفئة</th><td className="p-2 border">{entrySlip.category === 'أدوية حرجة' ? 'أدوية' : entrySlip.category}</td></tr>
+                        <tr><th className="p-2 border bg-slate-50">تنبيه النفاذ</th><td className="p-2 border">{lowStockLimitOf(entrySlip)} علبة</td></tr>
                         <tr><th className="p-2 border bg-slate-50">جودة الحفظ</th><td className="p-2 border font-bold">{entrySlip.storageQuality}</td></tr>
                       </tbody>
                     </table>
@@ -1780,6 +2085,7 @@ export default function App() {
                       <th className="py-4 px-5">رقم الدفعة (Batch)</th>
                       <th className="py-4 px-5">الباركود</th>
                       <th className="py-4 px-5">الكمية</th>
+                      <th className="py-4 px-5">تنبيه النفاذ</th>
                       <th className="py-4 px-5">حبات العلبة</th>
                       <th className="py-4 px-5">السعر الفردي</th>
                       <th className="py-4 px-5">تاريخ الصلاحية</th>
@@ -1791,7 +2097,7 @@ export default function App() {
                   <tbody className="divide-y divide-slate-100 text-xs md:text-sm">
                     {filteredItems.length === 0 ? (
                       <tr>
-                        <td colSpan="10" className="text-center py-10 text-slate-400 font-medium">
+                        <td colSpan="11" className="text-center py-10 text-slate-400 font-medium">
                           لا توجد بيانات مسجلة في هذا التبويب حالياً.
                         </td>
                       </tr>
@@ -1802,7 +2108,7 @@ export default function App() {
                         let qtyBadgeClass = "bg-emerald-50 text-emerald-700 border-emerald-200/60";
                         if (totalUnitsOf(item) === 0) {
                           qtyBadgeClass = "bg-red-50 text-red-700 border-red-200/60 font-black";
-                        } else if (Math.floor(totalUnitsOf(item) / unitsPerBoxOf(item)) <= 6) {
+                        } else if (isLowStock(item)) {
                           qtyBadgeClass = "bg-amber-50 text-amber-700 border-amber-200/60 font-bold";
                         }
 
@@ -1830,6 +2136,7 @@ export default function App() {
                                 {formatStock(item)}
                               </span>
                             </td>
+                            <td className="py-4 px-5 font-bold text-slate-700">{lowStockLimitOf(item)} علبة</td>
                             <td className="py-4 px-5 font-bold text-slate-700">{unitsPerBoxOf(item)} حبة</td>
                             <td className="py-4 px-5 font-mono font-bold text-slate-700">
                               {item.price ? `${item.price.toFixed(2)} ر.س` : '0.00 ر.س'}
@@ -1864,9 +2171,10 @@ export default function App() {
                                       </button>
                                     </>
                                   )}
-                                  {currentUser.role !== 'data_entry' && (daysLeft <= 0 && totalUnitsOf(item) > 0 ? (
+                                  {currentUser.role !== 'data_entry' && daysLeft <= 0 && totalUnitsOf(item) > 0 && (
                                     currentUser.role === 'supervisor' ? (
                                       <button
+                                        type="button"
                                         onClick={() => handleDispose(item.id)}
                                         className="px-3.5 py-1.5 bg-red-600 hover:bg-red-500 text-white rounded-xl text-xs font-bold shadow-md transition"
                                       >
@@ -1875,21 +2183,7 @@ export default function App() {
                                     ) : (
                                       <span className="text-xs text-red-500 font-bold">يتطلب مشرف للإتلاف</span>
                                     )
-                                  ) : (
-                                    currentUser.role === 'supervisor' && (
-                                      <button
-                                        type="button"
-                                        onClick={() => {
-                                          const updated = items.map(i => i.id === item.id ? withStock(i, totalUnitsOf(i) + unitsPerBoxOf(i)) : i);
-                                          setItems(updated);
-                                          addLog('إضافة مخزون', `إضافة 1 علبة (${unitsPerBoxOf(item)} حبة) لـ ${item.name}`, 'checkin');
-                                        }}
-                                        className="px-3 py-1.5 bg-slate-100 hover:bg-emerald-50 text-slate-700 hover:text-emerald-600 border border-slate-200/80 rounded-xl text-xs font-bold transition"
-                                      >
-                                        إضافة +
-                                      </button>
-                                    )
-                                  ))}
+                                  )}
                                 </div>
                               )}
                             </td>
