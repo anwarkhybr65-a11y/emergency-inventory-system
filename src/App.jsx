@@ -16,9 +16,9 @@ const playSound = (type) => {
       gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.15);
       osc.start();
       osc.stop(ctx.currentTime + 0.15);
-    } else if (type === 'error') {
+    } else if (type === 'error' || type === 'alert') {
       osc.type = 'sawtooth';
-      osc.frequency.setValueAtTime(220, ctx.currentTime);
+      osc.frequency.setValueAtTime(type === 'alert' ? 880 : 220, ctx.currentTime);
       gain.gain.setValueAtTime(0.2, ctx.currentTime);
       gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
       osc.start();
@@ -338,6 +338,106 @@ const fromDbLog = (row) => ({
   type: row.type,
 });
 
+const SEEN_REQUISITIONS_KEY = 'emergency_seen_requisitions_v1';
+
+const REQUISITION_ITEM_STATUSES = ['pending', 'review', 'supplied'];
+
+const requisitionStatusLabel = (status) => (
+  status === 'supplied' ? 'تمت التلبية' : status === 'review' ? 'قيد المراجعة' : 'معلق'
+);
+
+const requisitionItemsFrom = (payload, names) => {
+  const source = Array.isArray(payload.items) && payload.items.length
+    ? payload.items
+    : names.map((name) => ({ name, status: payload.status }));
+  const seen = new Set();
+  const items = source.flatMap((item) => {
+    const name = String(item?.name || '').trim();
+    if (!name || seen.has(name)) return [];
+    seen.add(name);
+    const status = REQUISITION_ITEM_STATUSES.includes(item?.status) ? item.status : 'pending';
+    return [{ name, status }];
+  });
+  names.forEach((name) => {
+    if (!seen.has(name)) items.push({ name, status: 'pending' });
+  });
+  return items;
+};
+
+const encodeRequisition = (payload) => `طلب توفير: ${payload.names.join(' · ')}\nREQ::${JSON.stringify(payload)}`;
+
+const parseRequisition = (log) => {
+  if (!log || (log.type !== 'requisition' && log.action !== 'طلب نقص')) return null;
+  const details = String(log.details || '');
+  const marker = details.indexOf('REQ::');
+  if (marker === -1) return null;
+  const raw = details.slice(marker + 5);
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}');
+  if (start === -1 || end <= start) return null;
+  try {
+    const payload = JSON.parse(raw.slice(start, end + 1));
+    const names = Array.isArray(payload.names) ? payload.names.map((name) => String(name).trim()).filter(Boolean) : [];
+    const items = requisitionItemsFrom(payload, names);
+    if (items.length === 0) return null;
+    return {
+      id: log.id,
+      names: items.map((item) => item.name),
+      items,
+      by: payload.by || '',
+      at: payload.at || log.createdAt || null,
+      timestamp: log.timestamp,
+    };
+  } catch {
+    return null;
+  }
+};
+
+const readSeenRequisitions = () => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SEEN_REQUISITIONS_KEY) || '[]');
+    return Array.isArray(saved) ? saved.map(String) : [];
+  } catch {
+    return [];
+  }
+};
+
+const REQUEST_ITEMS_KEY = 'emergency_request_items_v1';
+
+const normalizeRequestItems = (items) => {
+  const seen = new Set();
+  return (Array.isArray(items) ? items : []).flatMap((item) => {
+    const name = String(item?.name || '').trim();
+    if (!name || seen.has(name)) return [];
+    seen.add(name);
+    return [{ id: String(item.id || name), name, active: item.active !== false }];
+  });
+};
+
+const readRequestItems = () => {
+  try {
+    return normalizeRequestItems(JSON.parse(localStorage.getItem(REQUEST_ITEMS_KEY) || '[]'));
+  } catch {
+    return [];
+  }
+};
+
+const parseRequestCatalog = (log) => {
+  if (!log || log.type !== 'request_catalog') return null;
+  const details = String(log.details || '');
+  const marker = details.indexOf('CATALOG::');
+  if (marker === -1) return null;
+  const raw = details.slice(marker + 9);
+  const start = raw.indexOf('[');
+  const end = raw.lastIndexOf(']');
+  if (start === -1 || end <= start) return null;
+  try {
+    return normalizeRequestItems(JSON.parse(raw.slice(start, end + 1)));
+  } catch {
+    return null;
+  }
+};
+
 const parseArabicDate = (value) => {
   if (!value) return null;
   const normalized = String(value)
@@ -618,12 +718,20 @@ export default function App() {
   const [archiveFrom, setArchiveFrom] = useState('');
   const [archiveTo, setArchiveTo] = useState('');
   const [openArchiveKey, setOpenArchiveKey] = useState('');
+  const [requestedNames, setRequestedNames] = useState([]);
+  const [requestItems, setRequestItems] = useState(readRequestItems);
+  const [requestItemName, setRequestItemName] = useState('');
+  const [requestItemEdits, setRequestItemEdits] = useState({});
+  const [remoteRequisitions, setRemoteRequisitions] = useState([]);
+  const [requisitionBoard, setRequisitionBoard] = useState('open');
+  const [seenRequisitions, setSeenRequisitions] = useState(readSeenRequisitions);
   const [barcodeInput, setBarcodeInput] = useState('');
   const [patientFileNumber, setPatientFileNumber] = useState('');
   const [dispenseQty, setDispenseQty] = useState('');
   const [dispenseUnit, setDispenseUnit] = useState('box');
   const [scanMode, setScanMode] = useState('dispense');
   const [activeTab, setActiveTab] = useState('all');
+  const [reportsMenuOpen, setReportsMenuOpen] = useState(false);
   const [message, setMessage] = useState(null);
   const [showAddForm, setShowAddForm] = useState(false);
 
@@ -648,6 +756,7 @@ export default function App() {
   const [newAccount, setNewAccount] = useState({ username: '', fullName: '', role: 'nurse', password: '' });
 
   const barcodeRef = useRef(null);
+  const reportsMenuRef = useRef(null);
   const messageTimer = useRef(null);
   const itemsRef = useRef(items);
   const logsRef = useRef(logs);
@@ -659,6 +768,15 @@ export default function App() {
   logsRef.current = logs;
 
   useEffect(() => {
+    if (!reportsMenuOpen) return undefined;
+    const close = (event) => {
+      if (!reportsMenuRef.current?.contains(event.target)) setReportsMenuOpen(false);
+    };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [reportsMenuOpen]);
+
+  useEffect(() => {
     localStorage.setItem('emergency_inventory_data_v2', JSON.stringify(items));
   }, [items]);
 
@@ -666,6 +784,62 @@ export default function App() {
     localStorage.setItem('emergency_inventory_logs', JSON.stringify(logs));
     setArchive(buildPeriodicArchive(logs));
   }, [logs]);
+
+  useEffect(() => {
+    if (!currentUser) return undefined;
+    let cancelled = false;
+    const pullRequisitions = async () => {
+      const { data, error } = await supabase
+        .from('audit_logs')
+        .select(LOG_COLUMNS)
+        .eq('type', 'requisition')
+        .order('id', { ascending: false })
+        .limit(50);
+      if (cancelled || error || !data) return;
+      setRemoteRequisitions(data.map(fromDbLog).map(parseRequisition).filter(Boolean));
+    };
+    const pullCatalog = async () => {
+      const { data, error } = await supabase
+        .from('audit_logs')
+        .select(LOG_COLUMNS)
+        .eq('type', 'request_catalog')
+        .order('id', { ascending: false })
+        .limit(1);
+      if (cancelled || error || !data?.[0]) return;
+      const items = parseRequestCatalog(fromDbLog(data[0]));
+      if (!items) return;
+      localStorage.setItem(REQUEST_ITEMS_KEY, JSON.stringify(items));
+      setRequestItems((prev) => (JSON.stringify(prev) === JSON.stringify(items) ? prev : items));
+    };
+    pullRequisitions();
+    pullCatalog();
+    const timer = setInterval(() => {
+      pullRequisitions();
+      pullCatalog();
+    }, 2000);
+    const channel = supabase
+      .channel('nurse-requisitions')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'audit_logs' }, (payload) => {
+        const log = fromDbLog(payload.new || {});
+        const row = parseRequisition(log);
+        if (row) {
+          setRemoteRequisitions((prev) => (
+            prev.some((item) => String(item.id) === String(row.id)) ? prev : [row, ...prev]
+          ));
+        }
+        const catalog = parseRequestCatalog(log);
+        if (catalog) {
+          localStorage.setItem(REQUEST_ITEMS_KEY, JSON.stringify(catalog));
+          setRequestItems((prev) => (JSON.stringify(prev) === JSON.stringify(catalog) ? prev : catalog));
+        }
+      })
+      .subscribe();
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      supabase.removeChannel(channel);
+    };
+  }, [currentUser]);
 
   useEffect(() => {
     if (currentUser) {
@@ -896,7 +1070,7 @@ export default function App() {
 
   const addLog = (action, details, type, actor = currentUser) => {
     const label = actorLabel(actor);
-    const userString = details.includes('الصارف:') || !label ? '' : ` [${label}]`;
+    const userString = type === 'requisition' || type === 'request_catalog' || details.includes('الصارف:') || details.includes('REQ::') || details.includes('CATALOG::') || !label ? '' : ` [${label}]`;
     const newLogEntry = {
       id: Date.now(),
       timestamp: new Date().toLocaleString('ar-SA'),
@@ -1123,13 +1297,22 @@ export default function App() {
       return;
     }
 
+    const barcode = newItem.barcode.trim();
     const previous = items.find((item) => item.id === editingId);
+    const duplicateBarcode = items.find((item) => String(item.barcode || '').trim() === barcode && item.id !== editingId);
+    const barcodeUnchanged = previous && String(previous.barcode || '').trim() === barcode;
+    if (duplicateBarcode && !barcodeUnchanged) {
+      playSound('error');
+      showMessage(`الباركود (${barcode}) مسجل مسبقاً للصنف ${duplicateBarcode.name}، دفعة ${duplicateBarcode.batchNo}. لا يمكن تكرار الباركود.`, 'error');
+      return;
+    }
+
     const boxes = Math.max(0, Math.floor(Number(newItem.quantity) || 0));
     const loose = previous && unitsPerBoxOf(previous) === perBox ? totalUnitsOf(previous) % perBox : 0;
     const savedItem = withStock({
       id: editingId || Date.now(),
       name: newItem.name,
-      barcode: newItem.barcode.trim(),
+      barcode,
       batchNo: newItem.batchNo.trim(),
       price: Number(newItem.price) || 0,
       expiryDate: newItem.expiryDate,
@@ -1161,6 +1344,123 @@ export default function App() {
     resetItemForm();
     if (currentUser?.role === 'data_entry') setActiveTab('entryReport');
     playSound('success');
+  };
+
+  const requestCatalog = requestItems.filter((item) => item.active).map((item) => item.name);
+  const typedBarcode = newItem.barcode.trim();
+  const barcodeTaken = Boolean(typedBarcode) && items.some((item) => String(item.barcode || '').trim() === typedBarcode && item.id !== editingId);
+
+  const requisitionMap = new Map();
+  logs.forEach((log) => {
+    const row = parseRequisition(log);
+    if (row) requisitionMap.set(String(row.id), row);
+  });
+  remoteRequisitions.forEach((row) => requisitionMap.set(String(row.id), row));
+  const requisitionList = [...requisitionMap.values()].sort((a, b) => Number(b.id) - Number(a.id));
+  const openRequisitionNames = (row) => row.items.filter((item) => item.status !== 'supplied').map((item) => item.name);
+  const unreadRequisitions = currentUser?.role === 'supervisor'
+    ? requisitionList.filter((row) => !seenRequisitions.includes(String(row.id)) && openRequisitionNames(row).length > 0)
+    : [];
+  const latestUnread = unreadRequisitions[0];
+  const requisitionAlertRef = useRef(0);
+  useEffect(() => {
+    if (currentUser?.role !== 'supervisor') {
+      requisitionAlertRef.current = 0;
+      return;
+    }
+    if (unreadRequisitions.length > requisitionAlertRef.current) playSound('alert');
+    requisitionAlertRef.current = unreadRequisitions.length;
+  }, [unreadRequisitions.length, currentUser]);
+
+  const markRequisitionsSeen = (rows) => {
+    const ids = rows.map((row) => String(row.id));
+    setSeenRequisitions((prev) => {
+      const next = [...new Set([...prev, ...ids])];
+      localStorage.setItem(SEEN_REQUISITIONS_KEY, JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const openRequisitionReview = () => {
+    markRequisitionsSeen(unreadRequisitions);
+    setActiveTab('requisitionReview');
+  };
+
+  const toggleRequestedName = (name) => {
+    setRequestedNames((prev) => (prev.includes(name) ? prev.filter((item) => item !== name) : [...prev, name]));
+  };
+
+  const handleSendRequisition = () => {
+    if (currentUser?.role !== 'nurse') return;
+    const names = requestedNames.filter((name) => requestCatalog.includes(name));
+    if (names.length === 0) {
+      showMessage('اختاري صنفاً مفعّلاً من قائمة المشرف قبل إرسال الطلب.', 'error');
+      playSound('error');
+      return;
+    }
+    const payload = {
+      names,
+      by: dispenserLabel(currentUser, profiles),
+      at: new Date().toISOString(),
+    };
+    addLog('طلب نقص', encodeRequisition({ ...payload, items: names.map((name) => ({ name, status: 'pending' })) }), 'requisition');
+    setRequestedNames([]);
+    showMessage('تم إرسال طلب النقص إلى المشرف.', 'success');
+    playSound('success');
+  };
+
+  const persistRequisitionItems = async (request, items, message) => {
+    if (currentUser?.role !== 'supervisor') return;
+    const details = encodeRequisition({
+      names: items.map((item) => item.name),
+      by: request.by,
+      at: request.at,
+      items,
+    });
+    const { data, error } = await supabase
+      .from('audit_logs')
+      .update({ details })
+      .eq('id', request.id)
+      .select('id');
+    if (error || !data?.length) {
+      showMessage('تعذر حفظ حالة الطلب.', 'error');
+      return;
+    }
+    const parsed = parseRequisition({
+      id: request.id,
+      details,
+      type: 'requisition',
+      action: 'طلب نقص',
+      timestamp: request.timestamp,
+      createdAt: request.at,
+    });
+    setLogs((prev) => prev.map((log) => (String(log.id) === String(request.id) ? { ...log, details } : log)));
+    setRemoteRequisitions((prev) => (
+      parsed
+        ? (prev.some((row) => String(row.id) === String(request.id))
+          ? prev.map((row) => (String(row.id) === String(request.id) ? parsed : row))
+          : [parsed, ...prev])
+        : prev
+    ));
+    showMessage(message, 'success');
+  };
+
+  const handleRequisitionItemStatus = (request, name, status) => {
+    const items = request.items.map((item) => (item.name === name ? { ...item, status } : item));
+    const label = status === 'supplied' ? 'تمت التلبية' : status === 'review' ? 'قيد المراجعة' : 'الطلبات المعلقة';
+    persistRequisitionItems(request, items, `«${name}»: ${label}.`);
+  };
+
+  const handleRequisitionStatus = (request, status) => {
+    const items = request.items.map((item) => {
+      if (item.status === 'supplied' && status !== 'supplied' && status !== 'pending') return item;
+      if (status === 'review' && item.status === 'supplied') return item;
+      return { ...item, status };
+    });
+    const message = status === 'supplied'
+      ? 'تمت تلبية الأصناف المتبقية وأُزيلت من الطلبات المعلقة.'
+      : 'أصبحت الأصناف المتبقية قيد المراجعة.';
+    persistRequisitionItems(request, items, message);
   };
 
   const publishAccounts = async (list, message) => {
@@ -1267,6 +1567,52 @@ export default function App() {
     messageTimer.current = setTimeout(() => setMessage(null), type === 'fefo' ? 12000 : 5000);
   };
 
+  const saveRequestItems = (list) => {
+    const clean = normalizeRequestItems(list);
+    localStorage.setItem(REQUEST_ITEMS_KEY, JSON.stringify(clean));
+    setRequestItems(clean);
+    addLog('تحديث أصناف الطلبات', `CATALOG::${JSON.stringify(clean)}`, 'request_catalog');
+  };
+
+  const handleAddRequestItem = (e) => {
+    e.preventDefault();
+    if (currentUser?.role !== 'supervisor') return;
+    const name = requestItemName.trim();
+    if (!name) return;
+    if (requestItems.some((item) => item.name === name)) {
+      showMessage('هذا الصنف موجود مسبقاً في قائمة الطلبات.', 'error');
+      return;
+    }
+    saveRequestItems([...requestItems, { id: String(Date.now()), name, active: true }]);
+    setRequestItemName('');
+    showMessage(`تمت إضافة «${name}» وتفعيلها لطلبات التمريض.`, 'success');
+  };
+
+  const handleSaveRequestItemName = (id) => {
+    const name = String(requestItemEdits[id] ?? '').trim();
+    if (!name) {
+      showMessage('اسم الصنف مطلوب.', 'error');
+      return;
+    }
+    if (requestItems.some((item) => item.id !== id && item.name === name)) {
+      showMessage('هذا الاسم مستخدم لصنف آخر.', 'error');
+      return;
+    }
+    saveRequestItems(requestItems.map((item) => (item.id === id ? { ...item, name } : item)));
+    showMessage('تم تعديل اسم الصنف.', 'success');
+  };
+
+  const handleToggleRequestItem = (id) => {
+    saveRequestItems(requestItems.map((item) => (item.id === id ? { ...item, active: !item.active } : item)));
+  };
+
+  const handleDeleteRequestItem = (id) => {
+    const target = requestItems.find((item) => item.id === id);
+    if (!target) return;
+    saveRequestItems(requestItems.filter((item) => item.id !== id));
+    showMessage('تم حذف الصنف من قائمة الطلبات.', 'success');
+  };
+
   const filteredItems = items.filter(item => {
     if (activeTab === 'disposed') return item.status === 'disposed';
     if (item.status !== 'active') return false;
@@ -1276,6 +1622,7 @@ export default function App() {
   });
 
   const filteredLogs = logs.filter(log => {
+    if (log.type === 'request_catalog') return false;
     if (logFilter === 'all') return true;
     return log.type === logFilter;
   });
@@ -1503,7 +1850,7 @@ export default function App() {
       <div className="max-w-7xl mx-auto space-y-6">
         
         {/* Header */}
-        <header className="bg-white/80 backdrop-blur-xl p-6 rounded-3xl border border-white/60 shadow-xl shadow-slate-200/50 flex flex-col md:flex-row justify-between items-center gap-4 no-print">
+        <header className="relative z-40 bg-white/80 backdrop-blur-xl p-6 rounded-3xl border border-white/60 shadow-xl shadow-slate-200/50 flex flex-col md:flex-row justify-between items-center gap-4 no-print">
           <div className="flex items-center gap-4">
             <img
               src="/logo.png"
@@ -1535,12 +1882,35 @@ export default function App() {
                 >
                   <span>{showAddForm ? '✕ إغلاق' : '✨ إضافة صنف'}</span>
                 </button>
-                <button
-                  onClick={() => setActiveTab('entryReport')}
-                  className="px-4 py-2.5 bg-white hover:bg-slate-50 text-slate-700 font-bold rounded-2xl text-xs border border-slate-200/80 shadow-md transition flex items-center gap-1.5"
-                >
-                  <span>🖨️ تقرير الإدخال</span>
-                </button>
+                <div className="relative z-50" ref={reportsMenuRef}>
+                  <button
+                    type="button"
+                    onClick={() => setReportsMenuOpen((open) => !open)}
+                    className={`px-4 py-2.5 font-bold rounded-2xl text-xs shadow-md transition flex items-center gap-1.5 ${
+                      ['reports', 'expenseReport', 'entryReport', 'disposalReport', 'disposed', 'archive'].includes(activeTab) || reportsMenuOpen
+                        ? 'bg-slate-900 text-white'
+                        : 'bg-white hover:bg-slate-50 text-slate-700 border border-slate-200/80'
+                    }`}
+                  >
+                    <span>📊 تقارير</span>
+                  </button>
+                  {reportsMenuOpen && (
+                    <div className="absolute top-full mt-2 start-0 z-50 min-w-56 bg-white border border-slate-200 rounded-2xl shadow-xl p-2 flex flex-col gap-1">
+                      {currentUser.role === 'supervisor' && (
+                        <button type="button" onClick={() => { setActiveTab('expenseReport'); setReportsMenuOpen(false); }} className="px-4 py-2.5 text-right text-xs font-bold rounded-xl hover:bg-slate-50 text-slate-700">💊 تقارير الصرف</button>
+                      )}
+                      <button type="button" onClick={() => { setActiveTab('entryReport'); setReportsMenuOpen(false); }} className="px-4 py-2.5 text-right text-xs font-bold rounded-xl hover:bg-slate-50 text-slate-700">🖨️ تقرير الإدخال الفوري</button>
+                      {currentUser.role === 'supervisor' && (
+                        <>
+                          <button type="button" onClick={() => { setActiveTab('disposalReport'); setReportsMenuOpen(false); }} className="px-4 py-2.5 text-right text-xs font-bold rounded-xl hover:bg-slate-50 text-slate-700">🗑️ تقرير الإتلاف</button>
+                          <button type="button" onClick={() => { setActiveTab('disposed'); setReportsMenuOpen(false); }} className="px-4 py-2.5 text-right text-xs font-bold rounded-xl hover:bg-slate-50 text-slate-700">🗑️ سجل الإتلاف ({disposedItems.length})</button>
+                          <button type="button" onClick={() => { setActiveTab('reports'); setReportsMenuOpen(false); }} className="px-4 py-2.5 text-right text-xs font-bold rounded-xl hover:bg-slate-50 text-slate-700">📋 تقرير حالة الأدوية</button>
+                          <button type="button" onClick={() => { setActiveTab('archive'); setReportsMenuOpen(false); }} className="px-4 py-2.5 text-right text-xs font-bold rounded-xl hover:bg-slate-50 text-slate-700">🗄️ الأرشيف</button>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
               </>
             )}
             {currentUser.role === 'supervisor' && (
@@ -1553,28 +1923,19 @@ export default function App() {
                 </button>
 
                 <button
-                  onClick={() => setActiveTab('reports')}
-                  className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-2xl text-xs shadow-md transition flex items-center gap-1.5"
+                  onClick={openRequisitionReview}
+                  className="relative px-4 py-2.5 bg-white hover:bg-slate-50 text-slate-700 font-bold rounded-2xl text-xs border border-slate-200/80 shadow-md transition flex items-center gap-1.5"
                 >
-                  <span>📋 تقرير حالة الأدوية</span>
+                  <span>📋 طلبات التمريض</span>
+                  {unreadRequisitions.length > 0 && (
+                    <span className="absolute -top-2 -left-2 min-w-5 h-5 px-1 rounded-full bg-red-600 text-white text-[10px] leading-5 text-center">{unreadRequisitions.length}</span>
+                  )}
                 </button>
                 <button
-                  onClick={() => setActiveTab('expenseReport')}
+                  onClick={() => setActiveTab('requestCatalog')}
                   className="px-4 py-2.5 bg-white hover:bg-slate-50 text-slate-700 font-bold rounded-2xl text-xs border border-slate-200/80 shadow-md transition flex items-center gap-1.5"
                 >
-                  <span>💊 تقارير الصرف</span>
-                </button>
-                <button
-                  onClick={() => setActiveTab('disposalReport')}
-                  className="px-4 py-2.5 bg-white hover:bg-slate-50 text-slate-700 font-bold rounded-2xl text-xs border border-slate-200/80 shadow-md transition flex items-center gap-1.5"
-                >
-                  <span>🗑️ تقرير الإتلاف</span>
-                </button>
-                <button
-                  onClick={() => setActiveTab('archive')}
-                  className="px-4 py-2.5 bg-white hover:bg-slate-50 text-slate-700 font-bold rounded-2xl text-xs border border-slate-200/80 shadow-md transition flex items-center gap-1.5"
-                >
-                  <span>🗄️ الأرشيف</span>
+                  <span>⚙️ أصناف الطلبات</span>
                 </button>
                 <button
                   onClick={() => setActiveTab('settings')}
@@ -1585,6 +1946,15 @@ export default function App() {
               </>
             )}
 
+            {currentUser.role === 'nurse' && (
+              <button
+                onClick={() => setActiveTab('requisition')}
+                className="px-4 py-2.5 bg-sky-700 hover:bg-sky-600 text-white font-bold rounded-2xl text-xs shadow-md transition flex items-center gap-1.5"
+              >
+                <span>📋 طلبات النقص</span>
+              </button>
+            )}
+
             <button
               onClick={handleLogout}
               className="px-4 py-2.5 bg-red-50 hover:bg-red-100 text-red-600 font-bold rounded-2xl text-xs border border-red-200/80 transition flex items-center gap-1.5"
@@ -1593,6 +1963,20 @@ export default function App() {
             </button>
           </div>
         </header>
+
+        {currentUser.role === 'supervisor' && latestUnread && (
+          <button
+            type="button"
+            onClick={openRequisitionReview}
+            className="sticky top-3 z-50 w-full text-right bg-red-600 hover:bg-red-500 text-white rounded-3xl px-6 py-4 shadow-lg no-print flex items-center justify-between gap-4"
+          >
+            <span>
+              <span className="block font-black">تنبيه فوري: طلب نقص من {latestUnread.by || 'التمريض'}</span>
+              <span className="block text-xs mt-1 font-semibold">{openRequisitionNames(latestUnread).join('، ')}</span>
+            </span>
+            <span className="text-xs font-bold bg-white/20 rounded-xl px-3 py-2 shrink-0">مراجعة الأصناف ({unreadRequisitions.length})</span>
+          </button>
+        )}
 
         {/* نموذج الإضافة للمشرف فقط */}
         {showAddForm && canManageItems(currentUser) && (
@@ -1641,8 +2025,15 @@ export default function App() {
                     placeholder="امسحي بالقارئ أو اكتبي"
                     value={newItem.barcode}
                     onChange={(e) => setNewItem({ ...newItem, barcode: e.target.value })}
-                    className="w-full px-4 py-3 bg-slate-50/80 border border-slate-200 rounded-2xl text-slate-800 font-mono focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 transition"
+                    className={`w-full px-4 py-3 bg-slate-50/80 border rounded-2xl text-slate-800 font-mono focus:outline-none focus:ring-2 transition ${
+                      barcodeTaken
+                        ? 'border-red-500 focus:ring-red-500/30 focus:border-red-500'
+                        : 'border-slate-200 focus:ring-emerald-500/30 focus:border-emerald-500'
+                    }`}
                   />
+                  {barcodeTaken && (
+                    <p className="text-[11px] text-red-600 font-bold mt-1">لا يُقبل باركود مسجل مسبقاً لصنف آخر.</p>
+                  )}
                 </div>
                 <div>
                   <label className="block text-slate-700 font-bold mb-1">رقم الدفعة (Batch) *</label>
@@ -1827,29 +2218,20 @@ export default function App() {
               تنبيه الصلاحية (≤30 يوم)
             </button>
 
-            {canManageItems(currentUser) && (
+            {currentUser.role === 'nurse' && (
               <button
-                onClick={() => setActiveTab('entryReport')}
+                onClick={() => setActiveTab('requisition')}
                 className={`px-5 py-2.5 rounded-2xl text-xs md:text-sm font-bold transition-all ${
-                  activeTab === 'entryReport' ? 'bg-emerald-600 text-white shadow-lg' : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200/60'
+                  activeTab === 'requisition' ? 'bg-sky-700 text-white shadow-lg' : 'bg-white text-sky-800 hover:bg-sky-50 border border-sky-200'
                 }`}
               >
-                🖨️ تقرير الإدخال الفوري
+                📋 طلبات النقص
               </button>
             )}
 
             {/* مقتصر على المشرف */}
             {currentUser.role === 'supervisor' && (
               <>
-                <button
-                  onClick={() => setActiveTab('disposed')}
-                  className={`px-5 py-2.5 rounded-2xl text-xs md:text-sm font-bold transition-all ${
-                    activeTab === 'disposed' ? 'bg-slate-700 text-white shadow-lg' : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200/60'
-                  }`}
-                >
-                  سجل الإتلاف 🗑️ ({disposedItems.length})
-                </button>
-
                 <button
                   onClick={() => setActiveTab('logs')}
                   className={`px-5 py-2.5 rounded-2xl text-xs md:text-sm font-bold transition-all ${
@@ -1860,36 +2242,20 @@ export default function App() {
                 </button>
 
                 <button
-                  onClick={() => setActiveTab('reports')}
+                  onClick={openRequisitionReview}
                   className={`px-5 py-2.5 rounded-2xl text-xs md:text-sm font-bold transition-all ${
-                    activeTab === 'reports' ? 'bg-teal-600 text-white shadow-lg' : 'bg-teal-50 text-teal-700 hover:bg-teal-100 border border-teal-200/60'
+                    activeTab === 'requisitionReview' ? 'bg-red-700 text-white shadow-lg' : 'bg-white text-red-700 hover:bg-red-50 border border-red-200'
                   }`}
                 >
-                  📋 تقرير حالة الأدوية
+                  📋 طلبات التمريض {unreadRequisitions.length > 0 ? `(${unreadRequisitions.length})` : ''}
                 </button>
                 <button
-                  onClick={() => setActiveTab('expenseReport')}
+                  onClick={() => setActiveTab('requestCatalog')}
                   className={`px-5 py-2.5 rounded-2xl text-xs md:text-sm font-bold transition-all ${
-                    activeTab === 'expenseReport' ? 'bg-sky-700 text-white shadow-lg' : 'bg-white text-sky-800 hover:bg-sky-50 border border-sky-200'
+                    activeTab === 'requestCatalog' ? 'bg-sky-800 text-white shadow-lg' : 'bg-white text-sky-900 hover:bg-sky-50 border border-sky-200'
                   }`}
                 >
-                  💊 تقارير الصرف
-                </button>
-                <button
-                  onClick={() => setActiveTab('disposalReport')}
-                  className={`px-5 py-2.5 rounded-2xl text-xs md:text-sm font-bold transition-all ${
-                    activeTab === 'disposalReport' ? 'bg-red-700 text-white shadow-lg' : 'bg-white text-red-700 hover:bg-red-50 border border-red-200'
-                  }`}
-                >
-                  🗑️ تقرير الإتلاف
-                </button>
-                <button
-                  onClick={() => setActiveTab('archive')}
-                  className={`px-5 py-2.5 rounded-2xl text-xs md:text-sm font-bold transition-all ${
-                    activeTab === 'archive' ? 'bg-slate-800 text-white shadow-lg' : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200/60'
-                  }`}
-                >
-                  🗄️ الأرشيف
+                  ⚙️ أصناف الطلبات
                 </button>
               </>
             )}
@@ -2425,6 +2791,195 @@ create policy "staff accounts open" on public.staff_accounts
                   إضافة الحساب
                 </button>
               </form>
+            </div>
+          ) : activeTab === 'requestCatalog' && currentUser.role === 'supervisor' ? (
+            <div className="p-6 space-y-5 bg-white">
+              <div className="border-b pb-4">
+                <h2 className="text-xl font-black text-slate-900">أصناف طلبات التمريض</h2>
+                <p className="text-xs text-slate-500 mt-1">أضيفي أو عدّلي أو احذفي أسماء الأدوية والمستلزمات، وفعّلي ما يُسمح للتمريض بطلبه فقط.</p>
+              </div>
+              <form onSubmit={handleAddRequestItem} className="flex flex-col md:flex-row gap-2">
+                <input
+                  type="text"
+                  value={requestItemName}
+                  onChange={(e) => setRequestItemName(e.target.value)}
+                  placeholder="اسم الصنف أو المستلزم"
+                  className="flex-1 px-4 py-3 border border-slate-200 rounded-2xl text-sm"
+                />
+                <button type="submit" className="px-5 py-3 bg-sky-800 text-white font-bold rounded-2xl text-sm">إضافة وتفعيل</button>
+              </form>
+              {requestItems.length === 0 ? (
+                <p className="text-sm text-slate-500">لا توجد أصناف في قائمة الطلبات. التمريض لن يرى أي اسم حتى تُضاف هنا وتُفعَّل.</p>
+              ) : (
+                <div className="space-y-3">
+                  {requestItems.map((item) => (
+                    <div key={item.id} className="border border-slate-200 rounded-2xl p-3 flex flex-col md:flex-row md:items-center gap-2">
+                      <input
+                        type="text"
+                        value={requestItemEdits[item.id] ?? item.name}
+                        onChange={(e) => setRequestItemEdits({ ...requestItemEdits, [item.id]: e.target.value })}
+                        className="flex-1 px-3 py-2 border border-slate-200 rounded-xl text-sm font-bold"
+                      />
+                      <button type="button" onClick={() => handleSaveRequestItemName(item.id)} className="px-4 py-2 bg-slate-900 text-white rounded-xl text-xs font-bold">حفظ التعديل</button>
+                      <button
+                        type="button"
+                        onClick={() => handleToggleRequestItem(item.id)}
+                        className={`px-4 py-2 rounded-xl text-xs font-bold ${item.active ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}
+                      >
+                        {item.active ? 'مفعّل للطلب' : 'موقوف'}
+                      </button>
+                      <button type="button" onClick={() => handleDeleteRequestItem(item.id)} className="px-4 py-2 bg-red-50 text-red-700 rounded-xl text-xs font-bold">حذف</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : activeTab === 'requisition' && currentUser.role === 'nurse' ? (
+            <div className="p-6 space-y-5 bg-white">
+              <div className="border-b pb-4">
+                <h2 className="text-xl font-black text-slate-900">طلبات النقص</h2>
+                <p className="text-xs text-slate-500 mt-1">تظهر هنا فقط الأصناف التي فعّلها المشرف للطلب.</p>
+              </div>
+              {requestCatalog.length === 0 ? (
+                <p className="text-sm text-slate-500">لم يفعّل المشرف أصنافاً للطلب بعد.</p>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                  {requestCatalog.map((name) => (
+                    <label key={name} className="flex items-center gap-3 px-4 py-3 border border-slate-200 rounded-2xl cursor-pointer hover:bg-slate-50">
+                      <input
+                        type="checkbox"
+                        checked={requestedNames.includes(name)}
+                        onChange={() => toggleRequestedName(name)}
+                        className="h-4 w-4"
+                      />
+                      <span className="font-bold text-sm text-slate-800">{name}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={handleSendRequisition}
+                  className="px-6 py-3 bg-sky-700 hover:bg-sky-600 text-white font-bold rounded-2xl text-sm"
+                >
+                  إرسال الطلب ({requestedNames.length})
+                </button>
+              </div>
+            </div>
+          ) : activeTab === 'requisitionReview' && currentUser.role === 'supervisor' ? (
+            <div className="p-6 space-y-5 bg-white">
+              <div className="border-b pb-4 flex flex-col md:flex-row md:items-end justify-between gap-3">
+                <div>
+                  <h2 className="text-xl font-black text-slate-900">طلبات نقص التمريض</h2>
+                  <p className="text-xs text-slate-500 mt-1">حدّثي حالة كل صنف. ما تمت تلبيته يخرج من الطلبات المعلقة ويبقى في سجل التلبية.</p>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setRequisitionBoard('open')}
+                    className={`px-4 py-2 rounded-2xl text-xs font-bold ${requisitionBoard === 'open' ? 'bg-sky-800 text-white' : 'bg-slate-100 text-slate-600'}`}
+                  >
+                    المعلقة ({requisitionList.filter((row) => openRequisitionNames(row).length > 0).length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRequisitionBoard('done')}
+                    className={`px-4 py-2 rounded-2xl text-xs font-bold ${requisitionBoard === 'done' ? 'bg-emerald-700 text-white' : 'bg-slate-100 text-slate-600'}`}
+                  >
+                    تمت التلبية ({requisitionList.filter((row) => row.items.some((item) => item.status === 'supplied')).length})
+                  </button>
+                </div>
+              </div>
+              {(() => {
+                const visibleRequests = requisitionList
+                  .map((request) => ({
+                    ...request,
+                    visibleItems: request.items.filter((item) => (
+                      requisitionBoard === 'done' ? item.status === 'supplied' : item.status !== 'supplied'
+                    )),
+                  }))
+                  .filter((request) => request.visibleItems.length > 0);
+                if (visibleRequests.length === 0) {
+                  return (
+                    <p className="text-sm text-slate-500">
+                      {requisitionBoard === 'done' ? 'لا توجد أصناف تمت تلبيتها بعد.' : 'لا توجد طلبات معلقة.'}
+                    </p>
+                  );
+                }
+                return visibleRequests.map((request) => (
+                  <div key={request.id} className="border border-slate-200 rounded-2xl overflow-hidden">
+                    <div className="px-4 py-3 bg-slate-50 flex flex-col md:flex-row md:items-center justify-between gap-2">
+                      <div>
+                        <p className="font-bold text-sm text-slate-800">{request.by || 'التمريض'}</p>
+                        <p className="text-xs text-slate-500">{request.at ? formatDateTime(new Date(request.at)) : request.timestamp}</p>
+                      </div>
+                      {requisitionBoard === 'open' && (
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleRequisitionStatus(request, 'review')}
+                            className="px-3 py-2 bg-amber-50 text-amber-800 rounded-xl text-xs font-bold"
+                          >
+                            قيد المراجعة
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleRequisitionStatus(request, 'supplied')}
+                            className="px-3 py-2 bg-emerald-50 text-emerald-800 rounded-xl text-xs font-bold"
+                          >
+                            تمت التلبية
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                    <ul className="divide-y divide-slate-100">
+                      {request.visibleItems.map((item) => (
+                        <li key={item.name} className="px-4 py-3 flex flex-col md:flex-row md:items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-semibold text-slate-800">{item.name}</span>
+                            <span className={`text-[11px] font-bold px-2 py-1 rounded-lg ${
+                              item.status === 'supplied' ? 'bg-emerald-50 text-emerald-700' : item.status === 'review' ? 'bg-amber-50 text-amber-800' : 'bg-slate-100 text-slate-500'
+                            }`}
+                            >
+                              {requisitionStatusLabel(item.status)}
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            {requisitionBoard === 'open' && item.status !== 'review' && (
+                              <button
+                                type="button"
+                                onClick={() => handleRequisitionItemStatus(request, item.name, 'review')}
+                                className="px-3 py-2 bg-amber-50 text-amber-800 rounded-xl text-xs font-bold"
+                              >
+                                قيد المراجعة
+                              </button>
+                            )}
+                            {requisitionBoard === 'open' && (
+                              <button
+                                type="button"
+                                onClick={() => handleRequisitionItemStatus(request, item.name, 'supplied')}
+                                className="px-3 py-2 bg-emerald-50 text-emerald-800 rounded-xl text-xs font-bold"
+                              >
+                                تمت التلبية
+                              </button>
+                            )}
+                            {requisitionBoard === 'done' && (
+                              <button
+                                type="button"
+                                onClick={() => handleRequisitionItemStatus(request, item.name, 'pending')}
+                                className="px-3 py-2 bg-slate-100 text-slate-700 rounded-xl text-xs font-bold"
+                              >
+                                إرجاع للمعلقة
+                              </button>
+                            )}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ));
+              })()}
             </div>
           ) : activeTab === 'entryReport' && canManageItems(currentUser) ? (
             <div className="p-6 space-y-4 bg-white">
